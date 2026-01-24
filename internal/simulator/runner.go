@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/dotandev/hintents/internal/logger"
 )
 
 // Runner handles the execution of the Rust simulator binary
@@ -47,11 +49,16 @@ func NewRunner() (*Runner, error) {
 
 // Run executes the simulation with the given request
 func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
+	logger.Logger.Debug("Starting simulation", "binary", r.BinaryPath)
+
 	// Serialize Request
 	inputBytes, err := json.Marshal(req)
 	if err != nil {
+		logger.Logger.Error("Failed to marshal simulation request", "error", err)
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
+
+	logger.Logger.Debug("Simulation request marshaled", "input_size", len(inputBytes))
 
 	// Prepare Command
 	cmd := exec.Command(r.BinaryPath)
@@ -61,20 +68,30 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 	cmd.Stderr = &stderr
 
 	// Execute
+	logger.Logger.Info("Executing simulator binary")
 	if err := cmd.Run(); err != nil {
+		logger.Logger.Error("Simulator execution failed", "error", err, "stderr", stderr.String())
 		return nil, fmt.Errorf("simulator execution failed: %w, stderr: %s", err, stderr.String())
 	}
+
+	logger.Logger.Debug("Simulator execution completed", "stdout_size", stdout.Len(), "stderr_size", stderr.Len())
 
 	// Deserialize Response
 	var resp SimulationResponse
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		logger.Logger.Error("Failed to unmarshal simulation response", "error", err, "output", stdout.String())
 		return nil, fmt.Errorf("failed to unmarshal response: %w, output: %s", err, stdout.String())
 	}
 
+	logger.Logger.Info("Simulation response received", "status", resp.Status)
+
 	// Check logic error from simulator
 	if resp.Status == "error" {
+		logger.Logger.Error("Simulation logic error", "error", resp.Error)
 		return nil, fmt.Errorf("simulation error: %s", resp.Error)
 	}
+
+	logger.Logger.Info("Simulation completed successfully")
 
 	return &resp, nil
 }
