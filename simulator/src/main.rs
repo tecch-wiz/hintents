@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use soroban_env_host::xdr::ReadXdr;
 use std::collections::HashMap;
 use std::io::{self, Read};
+use std::panic;
 
 #[derive(Debug, Deserialize)]
 struct SimulationRequest {
@@ -18,6 +19,13 @@ struct SimulationResponse {
     error: Option<String>,
     events: Vec<String>,
     logs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StructuredError {
+    error_type: String,
+    message: String,
+    details: Option<String>,
 }
 
 fn main() {
@@ -86,8 +94,6 @@ fn main() {
     host.set_diagnostic_level(soroban_env_host::DiagnosticLevel::Debug)
         .unwrap();
 
-    let mut loaded_entries_count = 0;
-
     // Populate Host Storage
     if let Some(entries) = &request.ledger_entries {
         for (key_xdr, entry_xdr) in entries {
@@ -118,7 +124,6 @@ fn main() {
             // TODO: Inject into host storage.
             // For MVP, we verify we can parse them.
             eprintln!("Parsed Ledger Entry: Key={:?}, Entry={:?}", key, entry);
-            loaded_entries_count += 1;
         }
     }
 
@@ -134,67 +139,133 @@ fn main() {
     };
 
     // Iterate and find InvokeHostFunction
+    // Wrap the contract invocation in panic protection
+    let invocation_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        execute_operations(&host, operations)
+    }));
+
+    match invocation_result {
+        Ok(Ok(execution_logs)) => {
+            // Successful execution
+            invocation_logs.extend(execution_logs);
+
+            // Capture Diagnostic Events
+            let events = match host.get_events() {
+                Ok(evs) => evs
+                    .0
+                    .iter()
+                    .map(|e| format!("{:?}", e))
+                    .collect::<Vec<String>>(),
+                Err(e) => vec![format!("Failed to retrieve events: {:?}", e)],
+            };
+
+            // Success Response
+            let response = SimulationResponse {
+                status: "success".to_string(),
+                error: None,
+                events,
+                logs: invocation_logs,
+            };
+
+            println!("{}", serde_json::to_string(&response).unwrap());
+        }
+        Ok(Err(host_error)) => {
+            // Host error during execution (e.g., contract trap, validation failure)
+            let structured_error = StructuredError {
+                error_type: "HostError".to_string(),
+                message: format!("{:?}", host_error),
+                details: Some(format!(
+                    "Contract execution failed with host error: {:?}",
+                    host_error
+                )),
+            };
+
+            let response = SimulationResponse {
+                status: "error".to_string(),
+                error: Some(serde_json::to_string(&structured_error).unwrap()),
+                events: vec![],
+                logs: invocation_logs,
+            };
+
+            println!("{}", serde_json::to_string(&response).unwrap());
+        }
+        Err(panic_info) => {
+            // Panic occurred during execution
+            let panic_message = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic occurred".to_string()
+            };
+
+            let structured_error = StructuredError {
+                error_type: "Panic".to_string(),
+                message: panic_message.clone(),
+                details: Some(format!(
+                    "Contract execution panicked. This typically indicates a critical error in the contract or host. Panic message: {}",
+                    panic_message
+                )),
+            };
+
+            invocation_logs.push(format!("PANIC: {}", panic_message));
+
+            let response = SimulationResponse {
+                status: "error".to_string(),
+                error: Some(serde_json::to_string(&structured_error).unwrap()),
+                events: vec![],
+                logs: invocation_logs,
+            };
+
+            println!("{}", serde_json::to_string(&response).unwrap());
+        }
+    }
+}
+
+/// Execute operations and handle host errors
+fn execute_operations(
+    _host: &soroban_env_host::Host,
+    operations: &soroban_env_host::xdr::VecM<soroban_env_host::xdr::Operation, 100>,
+) -> Result<Vec<String>, soroban_env_host::HostError> {
+    let mut logs = vec![];
+
     for op in operations.iter() {
         if let soroban_env_host::xdr::OperationBody::InvokeHostFunction(host_fn_op) = &op.body {
             match &host_fn_op.host_function {
                 soroban_env_host::xdr::HostFunction::InvokeContract(invoke_args) => {
-                    eprintln!("Found InvokeContract operation!");
+                    logs.push("Found InvokeContract operation!".to_string());
 
                     let address = &invoke_args.contract_address;
                     let func_name = &invoke_args.function_name;
                     let invoke_args_vec = &invoke_args.args;
 
-                    // Let's just FORMAT the data for now as proof of "Replay Logic" extraction.
-                    invocation_logs.push(format!("About to Invoke Contract: {:?}", address));
-                    invocation_logs.push(format!("Function: {:?}", func_name));
-                    invocation_logs.push(format!("Args Count: {}", invoke_args_vec.len()));
+                    logs.push(format!("About to Invoke Contract: {:?}", address));
+                    logs.push(format!("Function: {:?}", func_name));
+                    logs.push(format!("Args Count: {}", invoke_args_vec.len()));
 
                     // In a full implementation, we'd do:
-                    // let res = host.invoke_function(Host::from_xdr(address), ...);
+                    // let res = host.invoke_function(...)?;
+                    // For now, this is a placeholder for actual contract invocation
+
+                    // Example of how to handle HostError propagation:
+                    // match host.invoke_function(...) {
+                    //     Ok(result) => {
+                    //         logs.push(format!("Invocation successful: {:?}", result));
+                    //     }
+                    //     Err(e) => {
+                    //         // Propagate HostError up to be caught by the outer handler
+                    //         return Err(e);
+                    //     }
+                    // }
                 }
                 _ => {
-                    invocation_logs.push("Skipping non-InvokeContract Host Function".to_string());
+                    logs.push("Skipping non-InvokeContract Host Function".to_string());
                 }
             }
         }
     }
 
-    // Capture Diagnostic Events
-    // Note: In soroban-env-host > v20, 'get_events' returns inputs to internal event system.
-    // We want the literal events if possible, or formatted via 'events'.
-    // The previous mocked response just had "Parsed Envelope".
-    // Now we extract real events.
-
-    // We need to clone them out or iterate. 'host.get_events()' returns a reflected vector.
-    // Detailed event retrieval typically requires iterating host storage or using the events buffer.
-    // For MVP, we will try `host.events().0` if accessible or just `host.get_events()`.
-    // Actually `host.get_events()` returns `Result<Vec<HostEvent>, ...>`.
-
-    let events = match host.get_events() {
-        Ok(evs) => evs
-            .0
-            .iter()
-            .map(|e| format!("{:?}", e))
-            .collect::<Vec<String>>(),
-        Err(e) => vec![format!("Failed to retrieve events: {:?}", e)],
-    };
-
-    // Mock Success Response
-    let response = SimulationResponse {
-        status: "success".to_string(),
-        error: None,
-        events,
-        logs: {
-            let mut logs = vec![
-                format!("Host Initialized with Budget: {:?}", host.budget_cloned()),
-                format!("Loaded {} Ledger Entries", loaded_entries_count),
-            ];
-            logs.extend(invocation_logs);
-            logs
-        },
-    };
-
-    println!("{}", serde_json::to_string(&response).unwrap());
+    Ok(logs)
 }
 
 fn send_error(msg: String) {
@@ -206,3 +277,5 @@ fn send_error(msg: String) {
     };
     println!("{}", serde_json::to_string(&res).unwrap());
 }
+
+mod test;
