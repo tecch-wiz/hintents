@@ -28,6 +28,7 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"github.com/dotandev/hintents/internal/telemetry"
 	"github.com/stellar/go/clients/horizonclient"
+	hProtocol "github.com/stellar/go/protocols/horizon"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -522,4 +523,45 @@ func (c *Client) GetLedgerEntries(ctx context.Context, keys []string) (map[strin
 	logger.Logger.Info("Ledger entries fetched successfully", "found", len(entries), "requested", len(keys))
 
 	return entries, nil
+}
+
+type TransactionSummary struct {
+	Hash      string
+	Status    string
+	CreatedAt string
+}
+
+func (c *Client) GetAccountTransactions(ctx context.Context, account string, limit int) ([]TransactionSummary, error) {
+	logger.Logger.Debug("Fetching account transactions", "account", account)
+
+	req := horizonclient.TransactionRequest{
+		ForAccount: account,
+		Limit:      uint(limit),
+		Order:      horizonclient.OrderDesc,
+	}
+
+	page, err := c.Horizon.Transactions(req)
+	if err != nil {
+		logger.Logger.Error("Failed to fetch account transactions", "account", account, "error", err)
+		return nil, fmt.Errorf("failed to fetch account transactions: %w", err)
+	}
+
+	summaries := make([]TransactionSummary, 0, len(page.Embedded.Records))
+	for _, tx := range page.Embedded.Records {
+		summaries = append(summaries, TransactionSummary{
+			Hash:      tx.Hash,
+			Status:    getTransactionStatus(tx),
+			CreatedAt: tx.LedgerCloseTime.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	logger.Logger.Debug("Account transactions retrieved", "count", len(summaries))
+	return summaries, nil
+}
+
+func getTransactionStatus(tx hProtocol.Transaction) string {
+	if tx.Successful {
+		return "✓ success"
+	}
+	return "✗ failed"
 }
