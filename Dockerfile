@@ -1,36 +1,45 @@
-# Build Stage
-FROM golang:1.24-bookworm AS builder-go
+# Stage 1: Build Rust simulator
+FROM rust:alpine AS builder-rust
 
-WORKDIR /app
-
-# Install Rust
-RUN apt-get update && apt-get install -y curl build-essential
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Copy dependency files first
-COPY go.mod go.sum ./
-COPY simulator/Cargo.toml simulator/Cargo.lock ./simulator/
-COPY simulator/src ./simulator/src
-
-# Build Rust simulator
 WORKDIR /app/simulator
+
+# Install musl-dev for static linking
+RUN apk add --no-cache musl-dev
+
+# Copy Rust project files
+COPY simulator/Cargo.toml simulator/Cargo.lock ./
+COPY simulator/src ./src
+
+# Build release binary (statically linked by default on Alpine)
 RUN cargo build --release
 
-# Build Go CLI
+# Stage 2: Build Go CLI
+FROM golang:1.24-alpine AS builder-go
+
 WORKDIR /app
+
+# Copy Go dependency files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy Go source
 COPY . .
+
+# Build Go binary statically
+ENV CGO_ENABLED=0
 RUN go build -o erst cmd/erst/main.go
 
-# Final Stage
-FROM debian:bookworm-slim
+# Stage 3: Final Runtime Image
+FROM alpine:latest
 
 WORKDIR /app
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Copy binaries
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates
+
+# Copy binaries from builders
 COPY --from=builder-go /app/erst .
-COPY --from=builder-go /app/simulator/target/release/erst-sim ./simulator/target/release/erst-sim
+COPY --from=builder-rust /app/simulator/target/release/erst-sim ./simulator/target/release/erst-sim
 
 # Expose if needed (not for CLI)
 ENTRYPOINT ["./erst"]
