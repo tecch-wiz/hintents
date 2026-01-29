@@ -40,11 +40,44 @@ const (
 	FuturenetSorobanURL = "https://rpc-futurenet.stellar.org"
 )
 
+// NetworkConfig represents a Stellar network configuration
+type NetworkConfig struct {
+	Name              string
+	HorizonURL        string
+	NetworkPassphrase string
+	SorobanRPCURL     string
+}
+
+// Predefined network configurations
+var (
+	TestnetConfig = NetworkConfig{
+		Name:              "testnet",
+		HorizonURL:        TestnetHorizonURL,
+		NetworkPassphrase: "Test SDF Network ; September 2015",
+		SorobanRPCURL:     TestnetSorobanURL,
+	}
+
+	MainnetConfig = NetworkConfig{
+		Name:              "mainnet",
+		HorizonURL:        MainnetHorizonURL,
+		NetworkPassphrase: "Public Global Stellar Network ; September 2015",
+		SorobanRPCURL:     MainnetSorobanURL,
+	}
+
+	FuturenetConfig = NetworkConfig{
+		Name:              "futurenet",
+		HorizonURL:        FuturenetHorizonURL,
+		NetworkPassphrase: "Test SDF Future Network ; October 2022",
+		SorobanRPCURL:     FuturenetSorobanURL,
+	}
+)
+
 // Client handles interactions with the Stellar Network
 type Client struct {
 	Horizon    horizonclient.ClientInterface
 	Network    Network
 	SorobanURL string
+	Config     NetworkConfig
 }
 
 // TransactionResponse contains the raw XDR fields needed for simulation
@@ -63,11 +96,13 @@ func NewClient(net Network) *Client {
 
 	var horizonClient *horizonclient.Client
 	var sorobanURL string
+	var config NetworkConfig
 
 	switch net {
 	case Testnet:
 		horizonClient = horizonclient.DefaultTestNetClient
 		sorobanURL = TestnetSorobanURL
+		config = TestnetConfig
 	case Futurenet:
 		// Create a futurenet client (not available as default)
 		horizonClient = &horizonclient.Client{
@@ -75,17 +110,20 @@ func NewClient(net Network) *Client {
 			HTTP:       http.DefaultClient,
 		}
 		sorobanURL = FuturenetSorobanURL
+		config = FuturenetConfig
 	case Mainnet:
 		fallthrough
 	default:
 		horizonClient = horizonclient.DefaultPublicNetClient
 		sorobanURL = MainnetSorobanURL
+		config = MainnetConfig
 	}
 
 	return &Client{
 		Horizon:    horizonClient,
 		Network:    net,
 		SorobanURL: sorobanURL,
+		Config:     config,
 	}
 }
 
@@ -103,7 +141,35 @@ func NewClientWithURL(url string, net Network) *Client {
 		Horizon:    horizonClient,
 		Network:    net,
 		SorobanURL: defaultClient.SorobanURL,
+		Config:     defaultClient.Config,
 	}
+}
+
+// NewCustomClient creates a new RPC client for a custom/private network
+func NewCustomClient(config NetworkConfig) (*Client, error) {
+	if config.HorizonURL == "" {
+		return nil, fmt.Errorf("horizon URL is required for custom network")
+	}
+	if config.NetworkPassphrase == "" {
+		return nil, fmt.Errorf("network passphrase is required for custom network")
+	}
+
+	horizonClient := &horizonclient.Client{
+		HorizonURL: config.HorizonURL,
+		HTTP:       http.DefaultClient,
+	}
+
+	sorobanURL := config.SorobanRPCURL
+	if sorobanURL == "" {
+		sorobanURL = config.HorizonURL // Fallback to Horizon URL if no Soroban RPC specified
+	}
+
+	return &Client{
+		Horizon:    horizonClient,
+		Network:    "custom",
+		SorobanURL: sorobanURL,
+		Config:     config,
+	}, nil
 }
 
 // GetTransaction fetches the transaction details and full XDR data
@@ -138,6 +204,19 @@ func (c *Client) GetTransaction(ctx context.Context, hash string) (*TransactionR
 		ResultXdr:     tx.ResultXdr,
 		ResultMetaXdr: tx.ResultMetaXdr,
 	}, nil
+}
+
+// GetNetworkPassphrase returns the network passphrase for this client
+func (c *Client) GetNetworkPassphrase() string {
+	return c.Config.NetworkPassphrase
+}
+
+// GetNetworkName returns the network name for this client
+func (c *Client) GetNetworkName() string {
+	if c.Config.Name != "" {
+		return c.Config.Name
+	}
+	return "custom"
 }
 
 type GetLedgerEntriesRequest struct {

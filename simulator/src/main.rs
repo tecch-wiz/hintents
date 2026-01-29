@@ -9,6 +9,8 @@ mod gas_optimizer;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use soroban_env_host::events::Events;
 use soroban_env_host::xdr::ReadXdr;
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -20,7 +22,6 @@ use gas_optimizer::{BudgetMetrics, GasOptimizationAdvisor, OptimizationReport};
 struct SimulationRequest {
     envelope_xdr: String,
     result_meta_xdr: String,
-    // Key XDR -> Entry XDR
     ledger_entries: Option<HashMap<String, String>>,
     timestamp: Option<i64>,
     ledger_sequence: Option<u32>,
@@ -33,11 +34,20 @@ struct SimulationRequest {
     enable_optimization_advisor: bool,
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct CategorizedEvent {
+    event_type: String,
+    contract_id: Option<String>,
+    topics: Vec<String>,
+    data: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SimulationResponse {
     status: String,
     error: Option<String>,
     events: Vec<String>,
+    categorized_events: Vec<CategorizedEvent>,
     logs: Vec<String>,
     flamegraph: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +61,90 @@ struct BudgetUsage {
     cpu_instructions: u64,
     memory_bytes: u64,
     operations_count: usize,
+}
+
+fn categorize_event_for_analyzer(
+    event: &soroban_env_host::events::HostEvent,
+) -> Result<String, String> {
+    use soroban_env_host::xdr::{ContractEventBody, ContractEventType, ScVal};
+
+    let contract_id = match &event.event.contract_id {
+        Some(id) => format!("{:?}", id),
+        None => "unknown".to_string(),
+    };
+
+    let event_type_str = match &event.event.type_ {
+        ContractEventType::Contract => "contract",
+        ContractEventType::System => "system",
+        ContractEventType::Diagnostic => "diagnostic",
+    };
+
+    let (topics, _data_val) = match &event.event.body {
+        ContractEventBody::V0(v0) => (&v0.topics, &v0.data),
+    };
+
+    let event_json = if let Some(first_topic) = topics.get(0) {
+        let topic_str = format!("{:?}", first_topic);
+
+        if topic_str.contains("require_auth") {
+            let address = if let ScVal::Address(addr) = first_topic {
+                format!("{:?}", addr)
+            } else {
+                "unknown".to_string()
+            };
+
+            json!({
+                "type": "auth",
+                "contract": contract_id,
+                "address": address,
+                "event_type": event_type_str,
+            })
+            .to_string()
+        } else if topic_str.contains("set")
+            || topic_str.contains("write")
+            || topic_str.contains("storage")
+        {
+            json!({
+                "type": "storage_write",
+                "contract": contract_id,
+                "event_type": event_type_str,
+            })
+            .to_string()
+        } else if topic_str.contains("call") || topic_str.contains("invoke") {
+            if let ScVal::Symbol(sym) = first_topic {
+                json!({
+                    "type": "contract_call",
+                    "contract": contract_id,
+                    "function": sym.to_string(),
+                    "event_type": event_type_str,
+                })
+                .to_string()
+            } else {
+                json!({
+                    "type": "contract_call",
+                    "contract": contract_id,
+                    "event_type": event_type_str,
+                })
+                .to_string()
+            }
+        } else {
+            json!({
+                "type": "other",
+                "contract": contract_id,
+                "event_type": event_type_str,
+            })
+            .to_string()
+        }
+    } else {
+        json!({
+            "type": "other",
+            "contract": contract_id,
+            "event_type": event_type_str,
+        })
+        .to_string()
+    };
+
+    Ok(event_json)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +162,7 @@ fn main() {
             status: "error".to_string(),
             error: Some(format!("Failed to read stdin: {}", e)),
             events: vec![],
+            categorized_events: vec![],
             logs: vec![],
             flamegraph: None,
             optimization_report: None,
@@ -154,6 +249,7 @@ fn main() {
     };
 
 
+
             ];
             final_logs.extend(exec_logs);
 
@@ -161,11 +257,37 @@ fn main() {
                 status: "success".to_string(),
                 error: None,
                 events,
+                categorized_events,
                 logs: final_logs,
                 flamegraph: flamegraph_svg,
                 optimization_report,
                 budget_usage: Some(budget_usage),
             };
+
+            println!("{}", serde_json::to_string(&response).unwrap());
+        }
+        Ok(Err(host_error)) => {
+            // Host error during execution (e.g., contract trap, validation failure)
+            let structured_error = StructuredError {
+                error_type: "HostError".to_string(),
+                message: format!("{:?}", host_error),
+                details: Some(format!(
+                    "Contract execution failed with host error: {:?}",
+                    host_error
+                )),
+            };
+
+            let response = SimulationResponse {
+                status: "error".to_string(),
+                error: Some(serde_json::to_string(&structured_error).unwrap()),
+                events: vec![],
+                categorized_events: vec![],
+                logs: vec![],
+                flamegraph: None,
+                optimization_report: None,
+                budget_usage: None,
+            };
+
             println!("{}", serde_json::to_string(&response).unwrap());
         }
         Err(panic_info) => {
@@ -181,6 +303,7 @@ fn main() {
                 status: "error".to_string(),
                 error: Some(format!("Simulator panicked: {}", panic_msg)),
                 events: vec![],
+                categorized_events: vec![],
                 logs: vec![format!("PANIC: {}", panic_msg)],
                 flamegraph: None,
                 optimization_report: None,
@@ -194,19 +317,100 @@ fn main() {
 fn execute_operations(
     _host: &soroban_env_host::Host,
     operations: &soroban_env_host::xdr::VecM<soroban_env_host::xdr::Operation, 100>,
-) -> Vec<String> {
+) -> Result<Vec<String>, soroban_env_host::HostError> {
     let mut logs = vec![];
-    for (i, op) in operations.as_slice().iter().enumerate() {
-        logs.push(format!("Processing operation {}: {:?}", i, op.body));
-        // Placeholder for real host invocation
+
+    for op in operations.iter() {
+        if let soroban_env_host::xdr::OperationBody::InvokeHostFunction(host_fn_op) = &op.body {
+            match &host_fn_op.host_function {
+                soroban_env_host::xdr::HostFunction::InvokeContract(invoke_args) => {
+                    logs.push("Found InvokeContract operation!".to_string());
+
+                    let address = &invoke_args.contract_address;
+                    let func_name = &invoke_args.function_name;
+                    let invoke_args_vec = &invoke_args.args;
+
+                    logs.push(format!("About to Invoke Contract: {:?}", address));
+                    logs.push(format!("Function: {:?}", func_name));
+                    logs.push(format!("Args Count: {}", invoke_args_vec.len()));
+                }
+                _ => {
+                    logs.push("Skipping non-InvokeContract Host Function".to_string());
+                }
+            }
+        }
     }
-    logs
+    Ok(logs)
 }
 
-/// Decodes generic WASM traps into human-readable messages.
-fn decode_wasm_trap(err: &soroban_env_host::HostError) -> String {
-    let err_str = format!("{:?}", err);
-    let err_lower = err_str.to_lowercase();
+fn categorize_events(events: &Events) -> Vec<CategorizedEvent> {
+    use soroban_env_host::xdr::{ContractEventBody, ContractEventType, ScVal};
+
+    events
+        .0
+        .iter()
+        .filter_map(|event| {
+            // Access body to get topics and data
+            let (topics, data_val) = match &event.event.body {
+                ContractEventBody::V0(v0) => (&v0.topics, &v0.data),
+            };
+
+            if !event.failed_call {
+                let event_type = match &event.event.type_ {
+                    ContractEventType::Contract => {
+                        if let Some(topic) = topics.get(0) {
+                            if let ScVal::Symbol(sym) = topic {
+                                match sym.to_string().as_str() {
+                                    s if s.contains("require_auth") => "require_auth",
+                                    s if s.contains("set") || s.contains("write") => {
+                                        "storage_write"
+                                    }
+                                    _ => "contract",
+                                }
+                            } else {
+                                "contract"
+                            }
+                        } else {
+                            "contract"
+                        }
+                    }
+                    ContractEventType::System => "system",
+                    ContractEventType::Diagnostic => {
+                        if let Some(topic) = topics.get(0) {
+                            if let ScVal::Symbol(sym) = topic {
+                                match sym.to_string().as_str() {
+                                    s if s.contains("fn_call") => "invocation",
+                                    s if s.contains("fn_return") => "return",
+                                    _ => "diagnostic",
+                                }
+                            } else {
+                                "diagnostic"
+                            }
+                        } else {
+                            "diagnostic"
+                        }
+                    }
+                };
+
+                Some(CategorizedEvent {
+                    event_type: event_type.to_string(),
+                    contract_id: event
+                        .event
+                        .contract_id
+                        .as_ref()
+                        .map(|id| format!("{:?}", id)),
+                    topics: topics.iter().map(|t| format!("{:?}", t)).collect(),
+                    data: format!("{:?}", data_val),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+
+
 
 
         flamegraph: None,
