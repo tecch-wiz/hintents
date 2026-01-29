@@ -73,7 +73,7 @@ type SimulationResponse struct {
 	AuthTrace         *authtrace.AuthTrace `json:"auth_trace,omitempty"`
 	BudgetUsage       *BudgetUsage         `json:"budget_usage,omitempty"` // Resource consumption metrics
 	CategorizedEvents []CategorizedEvent   `json:"categorized_events,omitempty"`
-	ProtocolVersion   uint32               `json:"protocol_version,omitempty"`
+	ProtocolVersion   *uint32              `json:"protocol_version,omitempty"` // Protocol version used
 }
 
 type CategorizedEvent struct {

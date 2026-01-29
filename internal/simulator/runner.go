@@ -167,7 +167,7 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	resp.ProtocolVersion = proto.Version
+	resp.ProtocolVersion = &proto.Version
 
 	if resp.Status == "error" {
 		return nil, fmt.Errorf("simulation error: %s", resp.Error)
