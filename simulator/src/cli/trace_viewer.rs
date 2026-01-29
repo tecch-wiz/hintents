@@ -26,6 +26,7 @@
 
 use crate::theme::{load_theme};
 use crate::theme::ansi::apply;
+use crate::theme::load_theme;
 
 pub fn render_trace() {
     let theme = load_theme();

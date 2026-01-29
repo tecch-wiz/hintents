@@ -611,6 +611,52 @@ func printSimulationResult(network string, res *simulator.SimulationResponse) {
 		fmt.Printf("Error: %s
 ", res.Error)
 	}
+
+	// Display budget usage if available
+	if res.BudgetUsage != nil {
+		fmt.Printf("\nResource Usage:\n")
+		fmt.Printf("  CPU Instructions: %d\n", res.BudgetUsage.CPUInstructions)
+		fmt.Printf("  Memory Bytes: %d\n", res.BudgetUsage.MemoryBytes)
+		fmt.Printf("  Operations: %d\n", res.BudgetUsage.OperationsCount)
+	}
+
+	// Display diagnostic events with details
+	if len(res.DiagnosticEvents) > 0 {
+		fmt.Printf("\nDiagnostic Events: %d\n", len(res.DiagnosticEvents))
+		for i, event := range res.DiagnosticEvents {
+			if i < 10 { // Show first 10 events
+				fmt.Printf("  [%d] Type: %s", i+1, event.EventType)
+				if event.ContractID != nil {
+					fmt.Printf(", Contract: %s", *event.ContractID)
+				}
+				fmt.Printf("\n")
+				if len(event.Topics) > 0 {
+					fmt.Printf("      Topics: %v\n", event.Topics)
+				}
+				if event.Data != "" && len(event.Data) < 100 {
+					fmt.Printf("      Data: %s\n", event.Data)
+				}
+			}
+		}
+		if len(res.DiagnosticEvents) > 10 {
+			fmt.Printf("  ... and %d more events\n", len(res.DiagnosticEvents)-10)
+		}
+	} else {
+		fmt.Printf("\nEvents: %d\n", len(res.Events))
+	}
+
+	// Display logs
+	if len(res.Logs) > 0 {
+		fmt.Printf("\nLogs: %d\n", len(res.Logs))
+		for i, log := range res.Logs {
+			if i < 5 { // Show first 5 logs
+				fmt.Printf("  - %s\n", log)
+			}
+		}
+		if len(res.Logs) > 5 {
+			fmt.Printf("  ... and %d more logs\n", len(res.Logs)-5)
+		}
+	}
 	fmt.Printf("Events: %d, Logs: %d
 ", len(res.Events), len(res.Logs))
 }
@@ -621,9 +667,30 @@ func diffResults(res1, res2 *simulator.SimulationResponse, net1, net2 string) {
 [DIFF] Status mismatch: %s vs %s
 ", res1.Status, res2.Status)
 	}
+
+	// Compare diagnostic events if available
+	if len(res1.DiagnosticEvents) > 0 && len(res2.DiagnosticEvents) > 0 {
+		if len(res1.DiagnosticEvents) != len(res2.DiagnosticEvents) {
+			fmt.Printf("[DIFF] Diagnostic events count mismatch: %d vs %d\n",
+				len(res1.DiagnosticEvents), len(res2.DiagnosticEvents))
+		}
+	} else if len(res1.Events) != len(res2.Events) {
+		fmt.Printf("[DIFF] Events count mismatch: %d vs %d\n", len(res1.Events), len(res2.Events))
 	if len(res1.Events) != len(res2.Events) {
 		fmt.Printf("[DIFF] Events count mismatch: %d vs %d
 ", len(res1.Events), len(res2.Events))
+	}
+
+	// Compare budget usage if available
+	if res1.BudgetUsage != nil && res2.BudgetUsage != nil {
+		if res1.BudgetUsage.CPUInstructions != res2.BudgetUsage.CPUInstructions {
+			fmt.Printf("[DIFF] CPU instructions: %d vs %d\n",
+				res1.BudgetUsage.CPUInstructions, res2.BudgetUsage.CPUInstructions)
+		}
+		if res1.BudgetUsage.MemoryBytes != res2.BudgetUsage.MemoryBytes {
+			fmt.Printf("[DIFF] Memory bytes: %d vs %d\n",
+				res1.BudgetUsage.MemoryBytes, res2.BudgetUsage.MemoryBytes)
+		}
 	}
 }
 
