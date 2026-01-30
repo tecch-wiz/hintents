@@ -1,3 +1,17 @@
+// Copyright (c) 2026 dotandev
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package simulator
 
 import (
@@ -19,87 +33,177 @@ type RunnerInterface interface {
 // Runner handles the execution of the Rust simulator binary
 type Runner struct {
 	BinaryPath string
+	Debug      bool
 }
 
 // Compile-time check to ensure Runner implements RunnerInterface
 var _ RunnerInterface = (*Runner)(nil)
 
 // NewRunner creates a new simulator runner.
-// It checks for the binary in common locations.
-func NewRunner() (*Runner, error) {
-	// 1. Check environment variable
-	if envPath := os.Getenv("ERST_SIMULATOR_PATH"); envPath != "" {
-		return &Runner{BinaryPath: envPath}, nil
+// Search order:
+// 1. --sim-path override
+// 2. ENV var
+// 3. Local directory
+// 4. Dev target
+// 5. Global PATH
+func NewRunner(simPathOverride string, debug bool) (*Runner, error) {
+	path, source, err := findSimBinary(simPathOverride)
+	if err != nil {
+		return nil, err
 	}
 
-	// 2. Check current directory (for Docker/Production)
-	cwd, err := os.Getwd()
-	if err == nil {
-		localPath := filepath.Join(cwd, "erst-sim")
-		if _, err := os.Stat(localPath); err == nil {
-			return &Runner{BinaryPath: localPath}, nil
+	if debug {
+		logger.Logger.Debug(
+			"Simulator binary resolved",
+			"path", path,
+			"source", source,
+		)
+	}
+
+	return &Runner{
+		BinaryPath: path,
+		Debug:      debug,
+	}, nil
+}
+
+// -------------------- Binary Discovery --------------------
+
+func findSimBinary(simPathOverride string) (string, string, error) {
+	// 1. Flag override
+	if simPathOverride != "" {
+		if isExecutable(simPathOverride) {
+			return abs(simPathOverride), "flag --sim-path", nil
+		}
+		return "", "", fmt.Errorf("sim-path provided but not executable: %s", simPathOverride)
+	}
+
+	// 2. Environment variable
+	if env := os.Getenv("ERST_SIM_PATH"); env != "" {
+		if isExecutable(env) {
+			return abs(env), "env ERST_SIM_PATH", nil
 		}
 	}
 
-	// 3. Check development path (assuming running from sdk root)
-	devPath := filepath.Join("simulator", "target", "release", "erst-sim")
-	if _, err := os.Stat(devPath); err == nil {
-		return &Runner{BinaryPath: devPath}, nil
+	// 3. Local directory
+	cwd, err := os.Getwd()
+	if err == nil {
+		localCandidates := []string{
+			filepath.Join(cwd, "erst-sim"),
+			filepath.Join(cwd, "bin", "erst-sim"),
+		}
+
+		for _, p := range localCandidates {
+			if isExecutable(p) {
+				return abs(p), "local directory", nil
+			}
+		}
 	}
 
-	// 4. Check global PATH
-	if path, err := exec.LookPath("erst-sim"); err == nil {
-		return &Runner{BinaryPath: path}, nil
+	// 4. Dev target
+	devCandidates := []string{
+		filepath.Join("simulator", "target", "debug", "erst-sim"),
+		filepath.Join("simulator", "target", "release", "erst-sim"),
 	}
 
-	return nil, fmt.Errorf("simulator binary 'erst-sim' not found. Please build it or set ERST_SIMULATOR_PATH")
+	for _, p := range devCandidates {
+		if isExecutable(p) {
+			return abs(p), "dev target", nil
+		}
+	}
+
+	// 5. Global PATH
+	if p, err := exec.LookPath("erst-sim"); err == nil {
+		return p, "global PATH", nil
+	}
+
+	return "", "", fmt.Errorf(
+		"erst-sim binary not found (use --sim-path or set ERST_SIM_PATH)",
+	)
 }
 
-// Run executes the simulation with the given request
-func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
-	logger.Logger.Debug("Starting simulation", "binary", r.BinaryPath)
+func isExecutable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() && info.Mode()&0111 != 0
+}
 
-	// Serialize Request
+func abs(path string) string {
+	if p, err := filepath.Abs(path); err == nil {
+		return p
+	}
+	return path
+}
+
+// -------------------- Execution --------------------
+
+func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
+	proto := GetOrDefault(req.ProtocolVersion)
+
+	if req.ProtocolVersion != nil {
+		if err := Validate(*req.ProtocolVersion); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := r.applyProtocolConfig(req, proto); err != nil {
+		return nil, err
+	}
+
 	inputBytes, err := json.Marshal(req)
 	if err != nil {
 		logger.Logger.Error("Failed to marshal simulation request", "error", err)
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	logger.Logger.Debug("Simulation request marshaled", "input_size", len(inputBytes))
-
-	// Prepare Command
 	cmd := exec.Command(r.BinaryPath)
 	cmd.Stdin = bytes.NewReader(inputBytes)
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Execute
-	logger.Logger.Info("Executing simulator binary")
 	if err := cmd.Run(); err != nil {
 		logger.Logger.Error("Simulator execution failed", "error", err, "stderr", stderr.String())
 		return nil, fmt.Errorf("simulator execution failed: %w, stderr: %s", err, stderr.String())
 	}
 
-	logger.Logger.Debug("Simulator execution completed", "stdout_size", stdout.Len(), "stderr_size", stderr.Len())
-
-	// Deserialize Response
 	var resp SimulationResponse
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
-		logger.Logger.Error("Failed to unmarshal simulation response", "error", err, "output", stdout.String())
-		return nil, fmt.Errorf("failed to unmarshal response: %w, output: %s", err, stdout.String())
+		logger.Logger.Error("Failed to unmarshal response", "error", err)
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	logger.Logger.Info("Simulation response received", "status", resp.Status)
+	resp.ProtocolVersion = &proto.Version
 
-	// Check logic error from simulator
 	if resp.Status == "error" {
-		logger.Logger.Error("Simulation logic error", "error", resp.Error)
 		return nil, fmt.Errorf("simulation error: %s", resp.Error)
 	}
 
-	logger.Logger.Info("Simulation completed successfully")
-
 	return &resp, nil
+}
+
+func (r *Runner) applyProtocolConfig(req *SimulationRequest, proto *Protocol) error {
+	if req.CustomAuthCfg == nil {
+		req.CustomAuthCfg = make(map[string]interface{})
+	}
+
+	limits := make(map[string]interface{})
+	for k, v := range proto.Features {
+		switch k {
+		case "max_contract_size", "max_contract_data_size", "max_instruction_limit":
+			limits[k] = v
+		}
+	}
+
+	if len(limits) > 0 {
+		req.CustomAuthCfg["protocol_limits"] = limits
+	}
+
+	if opcodes, ok := proto.Features["supported_opcodes"].([]string); ok {
+		req.CustomAuthCfg["supported_opcodes"] = opcodes
+	}
+
+	return nil
 }
