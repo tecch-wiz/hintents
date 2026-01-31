@@ -25,6 +25,7 @@ import (
 	"github.com/dotandev/hintents/internal/snapshot"
 	"github.com/dotandev/hintents/internal/telemetry"
 	"github.com/dotandev/hintents/internal/tokenflow"
+	"github.com/dotandev/hintents/internal/watch"
 
 	"github.com/spf13/cobra"
 	"github.com/stellar/go/xdr"
@@ -46,6 +47,8 @@ var (
 	args               []string
 	noCacheFlag        bool
 	demoMode           bool
+	watchFlag          bool
+	watchTimeoutFlag   int
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -275,6 +278,37 @@ Local WASM Replay Mode:
 		}
 
 		// Fetch transaction details
+		if watchFlag {
+			spinner := watch.NewSpinner()
+			poller := watch.NewPoller(watch.PollerConfig{
+				InitialInterval: 1 * time.Second,
+				MaxInterval:     10 * time.Second,
+				TimeoutDuration: time.Duration(watchTimeoutFlag) * time.Second,
+			})
+
+			spinner.Start("Waiting for transaction to appear on-chain...")
+
+			result, err := poller.Poll(ctx, func(pollCtx context.Context) (interface{}, error) {
+				_, pollErr := client.GetTransaction(pollCtx, txHash)
+				if pollErr != nil {
+					return nil, pollErr
+				}
+				return true, nil
+			}, nil)
+
+			if err != nil {
+				spinner.StopWithError("Failed to poll for transaction")
+				return fmt.Errorf("watch mode error: %w", err)
+			}
+
+			if !result.Found {
+				spinner.StopWithError("Transaction not found within timeout")
+				return fmt.Errorf("transaction %s not found after %d seconds", txHash, watchTimeoutFlag)
+			}
+
+			spinner.StopWithMessage("Transaction found! Starting debug...")
+		}
+
 		fmt.Printf("Fetching transaction: %s\n", txHash)
 		resp, err := client.GetTransaction(ctx, txHash)
 		if err != nil {
@@ -863,6 +897,8 @@ func init() {
 	debugCmd.Flags().StringSliceVar(&args, "args", []string{}, "Mock arguments for local replay (JSON array of strings)")
 	debugCmd.Flags().BoolVar(&noCacheFlag, "no-cache", false, "Disable local ledger state caching")
 	debugCmd.Flags().BoolVar(&demoMode, "demo", false, "Print sample output (no network) - for testing color detection")
+	debugCmd.Flags().BoolVar(&watchFlag, "watch", false, "Poll for transaction on-chain before debugging")
+	debugCmd.Flags().IntVar(&watchTimeoutFlag, "watch-timeout", 30, "Timeout in seconds for watch mode")
 
 	rootCmd.AddCommand(debugCmd)
 }
