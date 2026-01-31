@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/dotandev/hintents/internal/logger"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // HashLedgerKey generates a deterministic SHA-256 hash of a Stellar LedgerKey.

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stellar/go/clients/horizonclient"
-	hProtocol "github.com/stellar/go/protocols/horizon"
-	"github.com/stellar/go/support/render/problem"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/clients/horizonclient"
+	hProtocol "github.com/stellar/go-stellar-sdk/protocols/horizon"
+	"github.com/stellar/go-stellar-sdk/support/render/problem"
+	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

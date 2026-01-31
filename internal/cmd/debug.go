@@ -29,7 +29,7 @@ import (
 	"github.com/dotandev/hintents/internal/watch"
 
 	"github.com/spf13/cobra"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 	"go.opentelemetry.io/otel/attribute"
 )
 

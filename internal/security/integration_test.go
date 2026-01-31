@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // TestDetector_FlawedContract simulates a known flawed contract with multiple vulnerabilities

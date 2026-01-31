@@ -10,7 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // DecodeResultXDR decodes a base64-encoded TransactionResult XDR and returns human-readable output

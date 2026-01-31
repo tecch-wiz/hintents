@@ -4,7 +4,7 @@
 
 package rpc
 
-import hProtocol "github.com/stellar/go/protocols/horizon"
+import hProtocol "github.com/stellar/go-stellar-sdk/protocols/horizon"
 
 // TransactionResponse holds the XDR data for a transaction
 type TransactionResponse struct {

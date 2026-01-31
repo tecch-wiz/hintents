@@ -21,7 +21,7 @@ import (
 
 	"github.com/dotandev/hintents/internal/rpc"
 	"github.com/dotandev/hintents/internal/simulator"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/spf13/cobra"
 )
 

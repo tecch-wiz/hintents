@@ -7,7 +7,7 @@ package decoder
 import (
 	"fmt"
 
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 func PrintEnvelope(d *DecodedEnvelope) {

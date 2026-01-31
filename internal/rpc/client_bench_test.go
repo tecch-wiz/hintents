@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	hProtocol "github.com/stellar/go/protocols/horizon"
+	hProtocol "github.com/stellar/go-stellar-sdk/protocols/horizon"
 )
 
 // ==================== Compute-Heavy Benchmarks ====================

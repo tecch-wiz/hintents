@@ -7,8 +7,8 @@ import (
 	"encoding/base64"
 	"time"
 
-	hProtocol "github.com/stellar/go/protocols/horizon"
-	"github.com/stellar/go/xdr"
+	hProtocol "github.com/stellar/go-stellar-sdk/protocols/horizon"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // LedgerEntryPair represents a ledger key-entry pair for simulation

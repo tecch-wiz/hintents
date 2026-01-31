@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"text/tabwriter"
 
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 type FormatType string

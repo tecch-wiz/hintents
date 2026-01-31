@@ -17,8 +17,8 @@ import (
 	"github.com/dotandev/hintents/internal/logger"
 
 	"github.com/dotandev/hintents/internal/telemetry"
-	"github.com/stellar/go/clients/horizonclient"
-	hProtocol "github.com/stellar/go/protocols/horizon"
+	"github.com/stellar/go-stellar-sdk/clients/horizonclient"
+	hProtocol "github.com/stellar/go-stellar-sdk/protocols/horizon"
 	"go.opentelemetry.io/otel/attribute"
 )
 
