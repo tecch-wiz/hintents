@@ -1,7 +1,6 @@
 // Copyright 2025 Erst Users
 // SPDX-License-Identifier: Apache-2.0
 
-
 package simulator
 
 import (
@@ -20,6 +19,9 @@ type Runner struct {
 	BinaryPath string
 	Debug      bool
 }
+
+// Compile-time check to ensure Runner implements RunnerInterface
+var _ RunnerInterface = (*Runner)(nil)
 
 // NewRunner creates a new simulator runner.
 // Search order:

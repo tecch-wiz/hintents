@@ -55,9 +55,9 @@ func TestGetOrDefault(t *testing.T) {
 
 func TestFeature(t *testing.T) {
 	tests := []struct {
-		version  uint32
-		key      string
-		wantErr  bool
+		version uint32
+		key     string
+		wantErr bool
 	}{
 		{20, "max_contract_size", false},
 		{21, "max_instruction_limit", false},
@@ -124,7 +124,7 @@ func TestSupported(t *testing.T) {
 
 func TestMergeFeatures(t *testing.T) {
 	custom := map[string]interface{}{
-		"custom_limit": 999999,
+		"custom_limit":      999999,
 		"max_contract_size": 131072,
 	}
 

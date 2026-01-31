@@ -1,3 +1,17 @@
+// Copyright 2024 Hintents Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+mod storage;
 // Copyright 2025 Erst Users
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,6 +20,7 @@ mod config;
 mod gas_optimizer;
 mod ipc;
 mod theme;
+mod runner;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -14,12 +29,15 @@ use std::collections::HashMap;
 use std::io::{self, Read};
 use std::panic;
 
-use crate::gas_optimizer::{BudgetMetrics, GasOptimizationAdvisor, OptimizationReport};
+use crate::gas_optimizer::{BudgetMetrics, GasOptimizationAdvisor, OptimizationReport, CPU_LIMIT, MEMORY_LIMIT};
 use soroban_env_host::events::Events;
 
 // -----------------------------------------------------------------------------
 // Data Structures
 // -----------------------------------------------------------------------------
+
+mod source_mapper;
+use source_mapper::{SourceLocation, SourceMapper};
 
 #[derive(Debug, Deserialize)]
 struct SimulationRequest {
@@ -28,6 +46,8 @@ struct SimulationRequest {
     result_meta_xdr: String,
     // Key XDR -> Entry XDR
     ledger_entries: Option<HashMap<String, String>>,
+    // Optional WASM bytecode for source mapping
+    contract_wasm: Option<String>,
     enable_optimization_advisor: bool,
     profile: Option<bool>,
 }
@@ -52,6 +72,10 @@ struct BudgetUsage {
     cpu_instructions: u64,
     memory_bytes: u64,
     operations_count: usize,
+    cpu_limit: u64,
+    memory_limit: u64,
+    cpu_usage_percent: f64,
+    memory_usage_percent: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +93,7 @@ struct SimulationResponse {
     diagnostic_events: Vec<DiagnosticEvent>,
     categorized_events: Vec<CategorizedEvent>,
     logs: Vec<String>,
+    source_location: Option<SourceLocation>,
     flamegraph: Option<String>,
     optimization_report: Option<OptimizationReport>,
     budget_usage: Option<BudgetUsage>,
@@ -124,6 +149,7 @@ fn main() {
                 diagnostic_events: vec![],
                 categorized_events: vec![],
                 logs: vec![],
+                source_location: None,
                 flamegraph: None,
                 optimization_report: None,
                 budget_usage: None,
@@ -149,10 +175,53 @@ fn main() {
         }
     };
 
+    // Decode ResultMeta XDR
+    let _result_meta = if request.result_meta_xdr.is_empty() {
+        eprintln!("Warning: ResultMetaXdr is empty. Host storage will be empty.");
+        None
+    } else {
+        match base64::engine::general_purpose::STANDARD.decode(&request.result_meta_xdr) {
+            Ok(bytes) => match soroban_env_host::xdr::TransactionResultMeta::from_xdr(
+                bytes,
+                soroban_env_host::xdr::Limits::none(),
+            ) {
+                Ok(meta) => Some(meta),
+                Err(e) => {
+                    return send_error(format!("Failed to parse ResultMeta XDR: {}", e));
+                }
+            },
+            Err(e) => {
+                eprintln!("Warning: Failed to decode ResultMeta Base64: {}. Proceeding with empty storage.", e);
+                None
+            }
+        }
+    };
+
+    // Initialize source mapper if WASM is provided
+    let source_mapper = if let Some(wasm_base64) = &request.contract_wasm {
+        match base64::engine::general_purpose::STANDARD.decode(wasm_base64) {
+            Ok(wasm_bytes) => {
+                let mapper = SourceMapper::new(wasm_bytes);
+                if mapper.has_debug_symbols() {
+                    eprintln!("Debug symbols found in WASM");
+                    Some(mapper)
+                } else {
+                    eprintln!("No debug symbols found in WASM");
+                    None
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to decode WASM base64: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Initialize Host
-    let host = soroban_env_host::Host::default();
-    host.set_diagnostic_level(soroban_env_host::DiagnosticLevel::Debug)
-        .unwrap();
+    let sim_host = runner::SimHost::new(None);
+    let host = sim_host.inner;
 
     let mut loaded_entries_count = 0;
 
@@ -203,10 +272,17 @@ fn main() {
     let cpu_insns = budget.get_cpu_insns_consumed().unwrap_or(0);
     let mem_bytes = budget.get_mem_bytes_consumed().unwrap_or(0);
 
+    let cpu_usage_percent = (cpu_insns as f64 / CPU_LIMIT as f64) * 100.0;
+    let memory_usage_percent = (mem_bytes as f64 / MEMORY_LIMIT as f64) * 100.0;
+
     let budget_usage = BudgetUsage {
         cpu_instructions: cpu_insns,
         memory_bytes: mem_bytes,
         operations_count: operations.as_slice().len(),
+        cpu_limit: CPU_LIMIT,
+        memory_limit: MEMORY_LIMIT,
+        cpu_usage_percent,
+        memory_usage_percent,
     };
 
     let optimization_report = if request.enable_optimization_advisor {
@@ -267,6 +343,31 @@ fn main() {
                                 .as_ref()
                                 .map(|contract_id| format!("{:?}", contract_id));
 
+                    // Simulate contract execution with error trapping
+                    if let Some(mapper) = &source_mapper {
+                        // In a real implementation, we would:
+                        // 1. Execute the contract function
+                        // 2. Catch any WASM traps or errors
+                        // 3. Map the failure point to source code
+
+                        // For demonstration, simulate a failure at WASM offset 0x1234
+                        let simulated_failure_offset = 0x1234u64;
+                        if let Some(location) =
+                            mapper.map_wasm_offset_to_source(simulated_failure_offset)
+                        {
+                            let error_msg = format!(
+                                "Contract execution failed. Failed at line {} in {}",
+                                location.line, location.file
+                            );
+                            return send_error_with_location(error_msg, Some(location));
+                        }
+                    }
+
+                    // In a full implementation, we'd do:
+                    // let res = host.invoke_function(Host::from_xdr(address), ...);
+                }
+                _ => {
+                    invocation_logs.push("Skipping non-InvokeContract Host Function".to_string());
                             let (topics, data) = match &event.event.body {
                                 soroban_env_host::xdr::ContractEventBody::V0(v0) => {
                                     let topics: Vec<String> =
@@ -429,7 +530,6 @@ fn send_error(msg: String) {
 
 #[allow(dead_code)]
 fn run_local_wasm_replay(wasm_path: &str, mock_args: &Option<Vec<String>>) {
-    use soroban_env_host::Host;
     use std::fs;
 
     eprintln!("🔧 Local WASM Replay Mode");
@@ -449,9 +549,8 @@ fn run_local_wasm_replay(wasm_path: &str, mock_args: &Option<Vec<String>>) {
     };
 
     // Initialize Host
-    let host = Host::default();
-    host.set_diagnostic_level(soroban_env_host::DiagnosticLevel::Debug)
-        .unwrap();
+    let sim_host = crate::runner::SimHost::new(None);
+    let host = sim_host.inner;
 
     eprintln!("✓ Initialized Host with diagnostic level: Debug");
 
@@ -490,6 +589,15 @@ fn run_local_wasm_replay(wasm_path: &str, mock_args: &Option<Vec<String>>) {
         status: "success".to_string(),
         error: None,
         events,
+        logs: {
+            let mut logs = vec![
+                format!("Host Initialized with Budget: {:?}", host.budget_cloned()),
+                format!("Loaded {} Ledger Entries", loaded_entries_count),
+            ];
+            logs.extend(invocation_logs);
+            logs
+        },
+        source_location: None, // Set when there's an actual failure
         diagnostic_events: vec![],
         categorized_events: vec![],
         logs,
@@ -501,6 +609,19 @@ fn run_local_wasm_replay(wasm_path: &str, mock_args: &Option<Vec<String>>) {
     println!("{}", serde_json::to_string(&response).unwrap());
 }
 
+fn send_error(msg: String) {
+    send_error_with_location(msg, None)
+}
+
+fn send_error_with_location(msg: String, source_location: Option<SourceLocation>) {
+    let res = SimulationResponse {
+        status: "error".to_string(),
+        error: Some(msg),
+        events: vec![],
+        logs: vec![],
+        source_location,
+    };
+    println!("{}", serde_json::to_string(&res).unwrap());
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -542,3 +663,19 @@ mod tests {
         assert!(msg.contains("VM Trap: Unknown Wasm Trap"));
     }
 }
+let decoded_before = storage::decode_input_entries(&request.ledger_entries);
+
+let before_snapshot = Some(capture_storage_snapshot(&decoded_before));
+
+let after_snapshot =
+    storage::snapshot_result_storage(&decoded_before, &_result_meta);
+
+
+report := analytics.CompareStorage(beforeSnapshot, afterSnapshot)
+
+fee := analytics.CalculateStorageFee(
+	report.DeltaBytes,
+	storageFeeModel,
+)
+
+analytics.PrintStorageReport(report, fee)

@@ -48,9 +48,13 @@ type DiagnosticEvent struct {
 
 // BudgetUsage represents resource consumption during simulation
 type BudgetUsage struct {
-	CPUInstructions uint64 `json:"cpu_instructions"`
-	MemoryBytes     uint64 `json:"memory_bytes"`
-	OperationsCount int    `json:"operations_count"`
+	CPUInstructions    uint64  `json:"cpu_instructions"`
+	MemoryBytes        uint64  `json:"memory_bytes"`
+	OperationsCount    int     `json:"operations_count"`
+	CPULimit           uint64  `json:"cpu_limit"`
+	MemoryLimit        uint64  `json:"memory_limit"`
+	CPUUsagePercent    float64 `json:"cpu_usage_percent"`
+	MemoryUsagePercent float64 `json:"memory_usage_percent"`
 }
 
 type SimulationResponse struct {

@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@stellar/stellar-sdk": "^14.5.0",
     "axios": "^1.13.4",
     "buffer": "^6.0.3",
     "chalk": "^4.1.2",
@@ -10,6 +11,7 @@
     "dotenv": "^17.2.3",
     "fast-json-stable-stringify": "^2.1.0",
     "path-browserify": "^1.0.1",
+    "pkcs11js": "^2.1.6",
     "stream-browserify": "^3.0.0"
   },
   "scripts": {

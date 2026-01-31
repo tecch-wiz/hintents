@@ -1,7 +1,6 @@
 // Copyright 2025 Erst Users
 // SPDX-License-Identifier: Apache-2.0
 
-
 package cmd
 
 import (
@@ -15,6 +14,7 @@ import (
 
 var (
 	// Build information populated by ldflags
+	Version   = "dev"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -83,6 +83,6 @@ func getVersionInfo() VersionInfo {
 }
 
 func init() {
-	versionCmd.Flags().Bool("json", false, "Output version information in JSON format")
 	rootCmd.AddCommand(versionCmd)
+	versionCmd.Flags().Bool("json", false, "Output version information in JSON format")
 }

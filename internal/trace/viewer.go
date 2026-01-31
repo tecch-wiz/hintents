@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/dotandev/hintents/internal/visualizer"
 )
 
 // InteractiveViewer provides a terminal-based interactive trace navigation interface
@@ -28,7 +30,7 @@ func NewInteractiveViewer(trace *ExecutionTrace) *InteractiveViewer {
 
 // Start begins the interactive trace viewing session
 func (v *InteractiveViewer) Start() error {
-	fmt.Println("🔍 ERST Interactive Trace Viewer")
+	fmt.Printf("%s ERST Interactive Trace Viewer\n", visualizer.Symbol("magnify"))
 	fmt.Println("=================================")
 	fmt.Printf("Transaction: %s\n", v.trace.TransactionHash)
 	fmt.Printf("Total Steps: %d\n\n", len(v.trace.States))
@@ -95,7 +97,7 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 	case "h", "help":
 		v.showHelp()
 	case "q", "quit", "exit":
-		fmt.Println("Goodbye! 👋")
+		fmt.Printf("Goodbye! %s\n", visualizer.Symbol("wave"))
 		return true
 	default:
 		fmt.Printf("Unknown command: %s. Type 'help' for available commands.\n", cmd)
@@ -108,11 +110,11 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 func (v *InteractiveViewer) stepForward() {
 	state, err := v.trace.StepForward()
 	if err != nil {
-		fmt.Printf("❌ %s\n", err)
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
 		return
 	}
 
-	fmt.Printf("➡️  Stepped forward to step %d\n", state.Step)
+	fmt.Printf("%s  Stepped forward to step %d\n", visualizer.Symbol("arrow_r"), state.Step)
 	v.displayCurrentState()
 }
 
@@ -120,11 +122,11 @@ func (v *InteractiveViewer) stepForward() {
 func (v *InteractiveViewer) stepBackward() {
 	state, err := v.trace.StepBackward()
 	if err != nil {
-		fmt.Printf("❌ %s\n", err)
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
 		return
 	}
 
-	fmt.Printf("⬅️  Stepped backward to step %d\n", state.Step)
+	fmt.Printf("%s  Stepped backward to step %d\n", visualizer.Symbol("arrow_l"), state.Step)
 	v.displayCurrentState()
 }
 
@@ -132,17 +134,17 @@ func (v *InteractiveViewer) stepBackward() {
 func (v *InteractiveViewer) jumpToStep(stepStr string) {
 	step, err := strconv.Atoi(stepStr)
 	if err != nil {
-		fmt.Printf("❌ Invalid step number: %s\n", stepStr)
+		fmt.Printf("%s Invalid step number: %s\n", visualizer.Error(), stepStr)
 		return
 	}
 
 	state, err := v.trace.JumpToStep(step)
 	if err != nil {
-		fmt.Printf("❌ %s\n", err)
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
 		return
 	}
 
-	fmt.Printf("🎯 Jumped to step %d\n", state.Step)
+	fmt.Printf("%s Jumped to step %d\n", visualizer.Symbol("target"), state.Step)
 	v.displayCurrentState()
 }
 
@@ -150,11 +152,11 @@ func (v *InteractiveViewer) jumpToStep(stepStr string) {
 func (v *InteractiveViewer) displayCurrentState() {
 	state, err := v.trace.GetCurrentState()
 	if err != nil {
-		fmt.Printf("❌ %s\n", err)
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
 		return
 	}
 
-	fmt.Println("\n📍 Current State")
+	fmt.Printf("\n%s Current State\n", visualizer.Symbol("pin"))
 	fmt.Println("================")
 	fmt.Printf("Step: %d/%d\n", state.Step, len(v.trace.States)-1)
 	fmt.Printf("Time: %s\n", state.Timestamp.Format("15:04:05.000"))
@@ -173,7 +175,7 @@ func (v *InteractiveViewer) displayCurrentState() {
 		fmt.Printf("Return: %v\n", state.ReturnValue)
 	}
 	if state.Error != "" {
-		fmt.Printf("❌ Error: %s\n", state.Error)
+		fmt.Printf("%s Error: %s\n", visualizer.Error(), state.Error)
 	}
 
 	// Show memory/state summary
@@ -189,11 +191,11 @@ func (v *InteractiveViewer) displayCurrentState() {
 func (v *InteractiveViewer) reconstructCurrentState() {
 	state, err := v.trace.ReconstructStateAt(v.trace.CurrentStep)
 	if err != nil {
-		fmt.Printf("❌ Failed to reconstruct state: %s\n", err)
+		fmt.Printf("%s Failed to reconstruct state: %s\n", visualizer.Error(), err)
 		return
 	}
 
-	fmt.Println("\n🔧 Reconstructed State")
+	fmt.Printf("\n%s Reconstructed State\n", visualizer.Symbol("wrench"))
 	fmt.Println("======================")
 	v.displayState(state)
 }
@@ -202,17 +204,17 @@ func (v *InteractiveViewer) reconstructCurrentState() {
 func (v *InteractiveViewer) reconstructState(stepStr string) {
 	step, err := strconv.Atoi(stepStr)
 	if err != nil {
-		fmt.Printf("❌ Invalid step number: %s\n", stepStr)
+		fmt.Printf("%s Invalid step number: %s\n", visualizer.Error(), stepStr)
 		return
 	}
 
 	state, err := v.trace.ReconstructStateAt(step)
 	if err != nil {
-		fmt.Printf("❌ Failed to reconstruct state: %s\n", err)
+		fmt.Printf("%s Failed to reconstruct state: %s\n", visualizer.Error(), err)
 		return
 	}
 
-	fmt.Printf("\n🔧 Reconstructed State at Step %d\n", step)
+	fmt.Printf("\n%s Reconstructed State at Step %d\n", visualizer.Symbol("wrench"), step)
 	fmt.Println("==================================")
 	v.displayState(state)
 }
@@ -249,7 +251,7 @@ func (v *InteractiveViewer) displayState(state *ExecutionState) {
 func (v *InteractiveViewer) showNavigationInfo() {
 	info := v.trace.GetNavigationInfo()
 
-	fmt.Println("\n📊 Navigation Info")
+	fmt.Printf("\n%s Navigation Info\n", visualizer.Symbol("chart"))
 	fmt.Println("==================")
 	fmt.Printf("Total Steps: %d\n", info["total_steps"])
 	fmt.Printf("Current Step: %d\n", info["current_step"])
@@ -269,14 +271,14 @@ func (v *InteractiveViewer) listSteps(countStr string) {
 	start := max(0, current-count/2)
 	end := min(len(v.trace.States)-1, start+count-1)
 
-	fmt.Printf("\n📋 Steps %d-%d\n", start, end)
+	fmt.Printf("\n%s Steps %d-%d\n", visualizer.Symbol("list"), start, end)
 	fmt.Println("===============")
 
 	for i := start; i <= end; i++ {
 		state := &v.trace.States[i]
 		marker := "  "
 		if i == current {
-			marker = "▶️"
+			marker = visualizer.Symbol("play")
 		}
 
 		fmt.Printf("%s %3d: %s", marker, i, state.Operation)
@@ -284,7 +286,7 @@ func (v *InteractiveViewer) listSteps(countStr string) {
 			fmt.Printf(" (%s)", state.Function)
 		}
 		if state.Error != "" {
-			fmt.Printf(" ❌")
+			fmt.Printf(" %s", visualizer.Error())
 		}
 		fmt.Println()
 	}
@@ -292,7 +294,7 @@ func (v *InteractiveViewer) listSteps(countStr string) {
 
 // showHelp displays available commands
 func (v *InteractiveViewer) showHelp() {
-	fmt.Println("\n📖 Available Commands")
+	fmt.Printf("\n%s Available Commands\n", visualizer.Symbol("book"))
 	fmt.Println("=====================")
 	fmt.Println("Navigation:")
 	fmt.Println("  n, next, forward     - Step forward")

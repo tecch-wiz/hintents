@@ -1,0 +1,3 @@
+ShareError
+AuthError
+UploadError

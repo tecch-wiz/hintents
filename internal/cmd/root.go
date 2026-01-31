@@ -1,16 +1,12 @@
 // Copyright 2025 Erst Users
 // SPDX-License-Identifier: Apache-2.0
 
-
 package cmd
 
 import (
 	"github.com/dotandev/hintents/internal/localization"
 	"github.com/spf13/cobra"
 )
-
-// Version is set by main.go from build flags
-var Version = "dev"
 
 // Global flag variables
 var (
@@ -79,5 +75,4 @@ func init() {
 	)
 
 	// Register commands
-	rootCmd.AddCommand(versionCmd)
 }
