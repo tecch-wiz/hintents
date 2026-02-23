@@ -17,6 +17,23 @@
         "command": "erst.triggerDebug",
         "title": "ERST: Trigger Debug",
         "category": "ERST"
+      },
+      {
+        "command": "erst.setTraceSearchQuery",
+        "title": "ERST: Set Trace Search Query",
+        "category": "ERST"
+      },
+      {
+        "command": "erst.exportTraceTree",
+        "title": "ERST: Export Trace Tree (JSON/HTML)",
+        "category": "ERST"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "erst.exportTraceTree",
+        "key": "e",
+        "when": "view == erst-traces && listFocus"
       }
     ],
     "viewsContainers": {
@@ -43,7 +60,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "test:unit": "npm run compile && node --test out/traceExport.test.js"
   },
   "dependencies": {
     "vscode-jsonrpc": "^8.2.1"
