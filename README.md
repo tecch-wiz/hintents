@@ -17,6 +17,7 @@ Currently, when a Soroban transaction fails on mainnet, developers receive a gen
 2.  **Local Simulation**: Re-execute the transaction logically in a local environment.
 3.  **Trace decoding**: Map execution steps and failures back to readable instructions or Rust source lines.
 4.  **Source Mapping**: Map WASM instruction failures to specific Rust source code lines using debug symbols.
+5.  **GitHub Source Links**: Automatically generate clickable GitHub links to source code locations in traces (when in a Git repository).
 
 ## Usage (MVP)
 

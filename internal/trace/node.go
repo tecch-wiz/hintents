@@ -15,6 +15,9 @@ type TraceNode struct {
 	Children   []*TraceNode // Child nodes in the execution tree
 	Parent     *TraceNode   // Parent node (nil for root)
 	Expanded   bool         // Whether this node is expanded in the UI
+	SourceFile string       // Source file path if available
+	SourceLine int          // Source line number if available
+	GitHubLink string       // GitHub link to source if available
 }
 
 // NewTraceNode creates a new trace node

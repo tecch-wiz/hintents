@@ -160,6 +160,10 @@ func Symbol(name string) string {
 			return "[LOGS]"
 		case "events":
 			return "[NET]"
+		case "file":
+			return "[FILE]"
+		case "link":
+			return "[LINK]"
 		default:
 			return name
 		}
@@ -198,6 +202,10 @@ func Symbol(name string) string {
 		return "[Logs]"
 	case "events":
 		return "[Events]"
+	case "file":
+		return "[File]"
+	case "link":
+		return "[Link]"
 	default:
 		return name
 	}

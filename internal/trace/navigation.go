@@ -21,6 +21,9 @@ type ExecutionState struct {
 	Error       string                 `json:"error,omitempty"`
 	HostState   map[string]interface{} `json:"host_state,omitempty"`
 	Memory      map[string]interface{} `json:"memory,omitempty"`
+	SourceFile  string                 `json:"source_file,omitempty"`
+	SourceLine  int                    `json:"source_line,omitempty"`
+	GitHubLink  string                 `json:"github_link,omitempty"`
 }
 
 // StateSnapshot represents a complete state snapshot for efficient reconstruction
