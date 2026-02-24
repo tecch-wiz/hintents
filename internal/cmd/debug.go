@@ -34,22 +34,23 @@ import (
 )
 
 var (
-	networkFlag        string
-	rpcURLFlag         string
-	rpcTokenFlag       string
-	tracingEnabled     bool
-	otlpExporterURL    string
-	generateTrace      bool
-	traceOutputFile    string
-	snapshotFlag       string
-	compareNetworkFlag string
-	verbose            bool
-	wasmPath           string
-	args               []string
-	noCacheFlag        bool
-	demoMode           bool
-	watchFlag          bool
-	watchTimeoutFlag   int
+	networkFlag         string
+	rpcURLFlag          string
+	rpcTokenFlag        string
+	tracingEnabled      bool
+	otlpExporterURL     string
+	generateTrace       bool
+	traceOutputFile     string
+	snapshotFlag        string
+	compareNetworkFlag  string
+	verbose             bool
+	wasmPath            string
+	args                []string
+	noCacheFlag         bool
+	demoMode            bool
+	watchFlag           bool
+	watchTimeoutFlag    int
+	protocolVersionFlag uint32
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -390,10 +391,20 @@ Local WASM Replay Mode:
 
 				fmt.Printf("Running simulation on %s...\n", networkFlag)
 				simReq := &simulator.SimulationRequest{
-					EnvelopeXdr:   resp.EnvelopeXdr,
-					ResultMetaXdr: resp.ResultMetaXdr,
-					LedgerEntries: ledgerEntries,
-					Timestamp:     ts,
+					EnvelopeXdr:     resp.EnvelopeXdr,
+					ResultMetaXdr:   resp.ResultMetaXdr,
+					LedgerEntries:   ledgerEntries,
+					Timestamp:       ts,
+					ProtocolVersion: nil,
+				}
+
+				// Apply protocol version override if specified
+				if protocolVersionFlag > 0 {
+					if err := simulator.Validate(protocolVersionFlag); err != nil {
+						return fmt.Errorf("invalid protocol version %d: %w", protocolVersionFlag, err)
+					}
+					simReq.ProtocolVersion = &protocolVersionFlag
+					fmt.Printf("Using protocol version override: %d\n", protocolVersionFlag)
 				}
 
 				simResp, err = runner.Run(simReq)
@@ -420,12 +431,21 @@ Local WASM Replay Mode:
 							return
 						}
 					}
-					primaryResult, primaryErr = runner.Run(&simulator.SimulationRequest{
-						EnvelopeXdr:   resp.EnvelopeXdr,
-						ResultMetaXdr: resp.ResultMetaXdr,
-						LedgerEntries: entries,
-						Timestamp:     ts,
-					})
+					simReq := &simulator.SimulationRequest{
+						EnvelopeXdr:     resp.EnvelopeXdr,
+						ResultMetaXdr:   resp.ResultMetaXdr,
+						LedgerEntries:   entries,
+						Timestamp:       ts,
+						ProtocolVersion: nil,
+					}
+					if protocolVersionFlag > 0 {
+						if err := simulator.Validate(protocolVersionFlag); err != nil {
+							primaryErr = fmt.Errorf("invalid protocol version %d: %w", protocolVersionFlag, err)
+							return
+						}
+						simReq.ProtocolVersion = &protocolVersionFlag
+					}
+					primaryResult, primaryErr = runner.Run(simReq)
 				}()
 
 				go func() {
@@ -458,12 +478,21 @@ Local WASM Replay Mode:
 						}
 					}
 
-					compareResult, compareErr = runner.Run(&simulator.SimulationRequest{
-						EnvelopeXdr:   resp.EnvelopeXdr,
-						ResultMetaXdr: compareResp.ResultMetaXdr,
-						LedgerEntries: entries,
-						Timestamp:     ts,
-					})
+					simReq := &simulator.SimulationRequest{
+						EnvelopeXdr:     resp.EnvelopeXdr,
+						ResultMetaXdr:   compareResp.ResultMetaXdr,
+						LedgerEntries:   entries,
+						Timestamp:       ts,
+						ProtocolVersion: nil,
+					}
+					if protocolVersionFlag > 0 {
+						if err := simulator.Validate(protocolVersionFlag); err != nil {
+							compareErr = fmt.Errorf("invalid protocol version %d: %w", protocolVersionFlag, err)
+							return
+						}
+						simReq.ProtocolVersion = &protocolVersionFlag
+					}
+					compareResult, compareErr = runner.Run(simReq)
 				}()
 
 				wg.Wait()
@@ -906,6 +935,7 @@ func init() {
 	debugCmd.Flags().BoolVar(&demoMode, "demo", false, "Print sample output (no network) - for testing color detection")
 	debugCmd.Flags().BoolVar(&watchFlag, "watch", false, "Poll for transaction on-chain before debugging")
 	debugCmd.Flags().IntVar(&watchTimeoutFlag, "watch-timeout", 30, "Timeout in seconds for watch mode")
+	debugCmd.Flags().Uint32Var(&protocolVersionFlag, "protocol-version", 0, "Override protocol version for simulation (20, 21, 22, etc)")
 
 	rootCmd.AddCommand(debugCmd)
 }
