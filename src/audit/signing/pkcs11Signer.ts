@@ -1,4 +1,4 @@
-import type { AuditSigner, PublicKey, Signature } from './types';
+import type { AuditSigner, PublicKey, Signature, HardwareAttestation, AttestationCertificate } from './types';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const lazyRequire = (name: string): any => {
@@ -133,5 +133,170 @@ export class Pkcs11Ed25519Signer implements AuditSigner {
         // ignore
       }
     }
+  }
+
+  /**
+   * Retrieves the hardware attestation certificate chain from the PKCS#11 token.
+   *
+   * This searches for X.509 certificates on the token that share the same
+   * CKA_ID as the signing key, then checks the CKA_SENSITIVE attribute
+   * to confirm that the private key is non-exportable. The certificates
+   * are returned in leaf-to-root order (best effort).
+   */
+  async attestation_chain(): Promise<HardwareAttestation | undefined> {
+    const pkcs11 = this.pkcs11;
+    if (!pkcs11) return undefined;
+
+    const lib = new pkcs11.PKCS11();
+    try {
+      lib.load(this.cfg.module);
+      lib.C_Initialize();
+
+      const slots = lib.C_GetSlotList(true);
+      if (!slots || slots.length === 0) return undefined;
+
+      const slot = this.cfg.slot ? slots[Number(this.cfg.slot)] : slots[0];
+      if (slot === undefined) return undefined;
+
+      // Get token info for metadata
+      let tokenInfo = 'unknown';
+      try {
+        const info = lib.C_GetTokenInfo(slot);
+        tokenInfo = `${(info.label ?? '').trim()} (${(info.manufacturerID ?? '').trim()})`;
+      } catch {
+        // Some tokens do not support C_GetTokenInfo fully
+      }
+
+      const session = lib.C_OpenSession(slot, pkcs11.CKF_SERIAL_SESSION | pkcs11.CKF_RW_SESSION);
+      try {
+        lib.C_Login(session, 1 /* CKU_USER */, this.cfg.pin);
+
+        // 1. Determine the CKA_ID of the signing key
+        const keyIdBuf = this.resolveKeyId(lib, pkcs11, session);
+        if (!keyIdBuf) return undefined;
+
+        // 2. Check CKA_SENSITIVE on the private key
+        const keyNonExportable = this.checkKeyNonExportable(lib, pkcs11, session, keyIdBuf);
+
+        // 3. Find all X.509 certificates with matching CKA_ID
+        const certificates = this.findCertificates(lib, pkcs11, session, keyIdBuf);
+
+        if (certificates.length === 0) return undefined;
+
+        return {
+          certificates,
+          token_info: tokenInfo,
+          key_non_exportable: keyNonExportable,
+          retrieved_at: new Date().toISOString(),
+        };
+      } finally {
+        try { lib.C_CloseSession(session); } catch { /* ignore */ }
+      }
+    } catch {
+      // Attestation retrieval is best-effort. Do not fail the audit if this errors.
+      return undefined;
+    } finally {
+      try { lib.C_Finalize(); } catch { /* ignore */ }
+    }
+  }
+
+  private resolveKeyId(lib: any, pkcs11: any, session: any): Buffer | undefined {
+    const template: any[] = [{ type: pkcs11.CKA_CLASS, value: pkcs11.CKO_PRIVATE_KEY }];
+    if (this.cfg.keyLabel) template.push({ type: pkcs11.CKA_LABEL, value: this.cfg.keyLabel });
+    if (this.cfg.keyIdHex) template.push({ type: pkcs11.CKA_ID, value: Buffer.from(this.cfg.keyIdHex, 'hex') });
+
+    lib.C_FindObjectsInit(session, template);
+    const keys = lib.C_FindObjects(session, 1);
+    lib.C_FindObjectsFinal(session);
+
+    const key = keys?.[0];
+    if (!key) return undefined;
+
+    try {
+      const attrs = lib.C_GetAttributeValue(session, key, [{ type: pkcs11.CKA_ID }]);
+      return attrs?.[0]?.value ? Buffer.from(attrs[0].value) : undefined;
+    } catch {
+      return this.cfg.keyIdHex ? Buffer.from(this.cfg.keyIdHex, 'hex') : undefined;
+    }
+  }
+
+  private checkKeyNonExportable(lib: any, pkcs11: any, session: any, keyId: Buffer): boolean {
+    const template: any[] = [
+      { type: pkcs11.CKA_CLASS, value: pkcs11.CKO_PRIVATE_KEY },
+      { type: pkcs11.CKA_ID, value: keyId },
+    ];
+
+    lib.C_FindObjectsInit(session, template);
+    const keys = lib.C_FindObjects(session, 1);
+    lib.C_FindObjectsFinal(session);
+
+    const key = keys?.[0];
+    if (!key) return false;
+
+    try {
+      const attrs = lib.C_GetAttributeValue(session, key, [{ type: pkcs11.CKA_SENSITIVE }]);
+      // CKA_SENSITIVE == true means key is non-exportable
+      return attrs?.[0]?.value === true || (attrs?.[0]?.value instanceof Uint8Array && attrs[0].value[0] === 1);
+    } catch {
+      return false;
+    }
+  }
+
+  private findCertificates(lib: any, pkcs11: any, session: any, keyId: Buffer): AttestationCertificate[] {
+    const certTemplate: any[] = [
+      { type: pkcs11.CKA_CLASS, value: pkcs11.CKO_CERTIFICATE },
+      { type: pkcs11.CKA_ID, value: keyId },
+    ];
+
+    lib.C_FindObjectsInit(session, certTemplate);
+    const certHandles = lib.C_FindObjects(session, 10);
+    lib.C_FindObjectsFinal(session);
+
+    const result: AttestationCertificate[] = [];
+
+    for (const handle of certHandles ?? []) {
+      try {
+        const attrs = lib.C_GetAttributeValue(session, handle, [
+          { type: pkcs11.CKA_VALUE },
+          { type: pkcs11.CKA_SUBJECT },
+          { type: pkcs11.CKA_ISSUER },
+          { type: pkcs11.CKA_SERIAL_NUMBER },
+        ]);
+
+        const derValue = attrs?.[0]?.value;
+        if (!derValue) continue;
+
+        const pem = this.derToPem(Buffer.from(derValue));
+        const subject = this.bufferToReadable(attrs?.[1]?.value);
+        const issuer = this.bufferToReadable(attrs?.[2]?.value);
+        const serial = attrs?.[3]?.value
+          ? Buffer.from(attrs[3].value).toString('hex')
+          : 'unknown';
+
+        result.push({ pem, subject, issuer, serial });
+      } catch {
+        // Skip certificates that cannot be read
+        continue;
+      }
+    }
+
+    return result;
+  }
+
+  private derToPem(der: Buffer): string {
+    const b64 = der.toString('base64');
+    const lines: string[] = [];
+    for (let i = 0; i < b64.length; i += 64) {
+      lines.push(b64.slice(i, i + 64));
+    }
+    return `-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----`;
+  }
+
+  private bufferToReadable(buf: any): string {
+    if (!buf) return 'unknown';
+    // Best-effort: strip non-printable DER wrapper bytes and extract readable ASCII
+    const raw = Buffer.from(buf);
+    const readable = raw.toString('utf8').replace(/[^\x20-\x7e]/g, '');
+    return readable || raw.toString('hex');
   }
 }
