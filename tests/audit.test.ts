@@ -1,3 +1,6 @@
+// Copyright (c) Hintents Authors.
+// SPDX-License-Identifier: Apache-2.0
+
 import { verify } from 'crypto';
 import { AuditLogger } from '../src/audit/AuditLogger';
 import { verifyAuditLog } from '../src/audit/AuditVerifier';

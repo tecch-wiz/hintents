@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dotandev/hintents/internal/config"
 	"github.com/dotandev/hintents/internal/decenstorage"
+	"github.com/dotandev/hintents/internal/decoder"
 	"github.com/dotandev/hintents/internal/errors"
 	"github.com/dotandev/hintents/internal/logger"
 	"github.com/dotandev/hintents/internal/rpc"
@@ -26,13 +28,13 @@ import (
 	"github.com/dotandev/hintents/internal/telemetry"
 	"github.com/dotandev/hintents/internal/tokenflow"
 	"github.com/dotandev/hintents/internal/visualizer"
+	"github.com/dotandev/hintents/internal/wat"
 	"github.com/dotandev/hintents/internal/watch"
 
 	"github.com/spf13/cobra"
 	"github.com/stellar/go-stellar-sdk/xdr"
 	"go.opentelemetry.io/otel/attribute"
 )
-
 var (
 	networkFlag         string
 	rpcURLFlag          string
@@ -58,6 +60,9 @@ var (
 	ipfsNodeFlag         string
 	arweaveGatewayFlag   string
 	arweaveWalletFlag    string
+	protocolVersionFlag uint32
+	themeFlag           string
+	mockTimeFlag        int64
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -201,6 +206,19 @@ Local WASM Replay Mode:
 
 		if err := rpc.ValidateTransactionHash(args[0]); err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("invalid transaction hash format: %v", err))
+		}
+
+		if !cmd.Flags().Changed("network") {
+			token := rpcTokenFlag
+			if token == "" {
+				token = os.Getenv("ERST_RPC_TOKEN")
+			}
+			probeCtx, probeCancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			defer probeCancel()
+			if resolved, err := rpc.ResolveNetwork(probeCtx, args[0], token); err == nil {
+				networkFlag = string(resolved)
+				fmt.Printf("Resolved network: %s\n", networkFlag)
+			}
 		}
 
 		// Validate network flag
@@ -376,7 +394,7 @@ Local WASM Replay Mode:
 		}
 
 		// Initialize Simulator Runner
-		runner, err := simulator.NewRunner("", tracingEnabled)
+		runner, err := simulator.NewRunnerWithMockTime("", tracingEnabled, mockTimeFlag)
 		if err != nil {
 			return errors.WrapSimulatorNotFound(err.Error())
 		}
@@ -447,6 +465,13 @@ Local WASM Replay Mode:
 					return errors.WrapSimulationFailed(err, "")
 				}
 				printSimulationResult(networkFlag, simResp)
+				// Fetch contract bytecode on demand for any contract calls in the trace; cache via RPC client
+				if client != nil && simResp != nil && len(simResp.DiagnosticEvents) > 0 {
+					contractIDs := collectContractIDsFromDiagnosticEvents(simResp.DiagnosticEvents)
+					if len(contractIDs) > 0 {
+						_, _ = rpc.FetchBytecodeForTraceContractCalls(ctx, client, contractIDs, nil)
+					}
+				}
 			} else {
 				// Comparison Run
 				var wg sync.WaitGroup
@@ -537,6 +562,13 @@ Local WASM Replay Mode:
 				if compareErr != nil {
 					return errors.WrapRPCConnectionFailed(compareErr)
 				}
+				// Fetch contract bytecode on demand for contract calls in the trace; cache via RPC client
+				if client != nil && primaryResult != nil && len(primaryResult.DiagnosticEvents) > 0 {
+					contractIDs := collectContractIDsFromDiagnosticEvents(primaryResult.DiagnosticEvents)
+					if len(contractIDs) > 0 {
+						_, _ = rpc.FetchBytecodeForTraceContractCalls(ctx, client, contractIDs, nil)
+					}
+				}
 
 				simResp = primaryResult // Use primary for further analysis
 				printSimulationResult(networkFlag, primaryResult)
@@ -548,6 +580,20 @@ Local WASM Replay Mode:
 
 		if lastSimResp == nil {
 			return errors.WrapSimulationLogicError("no simulation results generated")
+		}
+
+		// Analysis: Error Suggestions (Heuristic-based)
+		if len(lastSimResp.Events) > 0 {
+			suggestionEngine := decoder.NewSuggestionEngine()
+			
+			// Decode events for analysis
+			callTree, err := decoder.DecodeEvents(lastSimResp.Events)
+			if err == nil && callTree != nil {
+				suggestions := suggestionEngine.AnalyzeCallTree(callTree)
+				if len(suggestions) > 0 {
+					fmt.Print(decoder.FormatSuggestions(suggestions))
+				}
+			}
 		}
 
 		// Analysis: Security
@@ -744,13 +790,30 @@ func runLocalWasmReplay() error {
 	fmt.Printf("%s Executing contract locally...\n", visualizer.Symbol("play"))
 	resp, err := runner.Run(req)
 	if err != nil {
-		fmt.Printf("%s Execution failed: %v\n", visualizer.Error(), err)
+		fmt.Printf("%s Technical failure: %v\n", visualizer.Error(), err)
 		return err
 	}
 
 	// Display results
 	fmt.Println()
-	fmt.Printf("%s Execution completed successfully\n", visualizer.Success())
+	if resp.Status == "error" {
+		fmt.Printf("%s Execution failed\n", visualizer.Error())
+		if resp.Error != "" {
+			fmt.Printf("Error: %s\n", resp.Error)
+		}
+
+		// Fallback to WAT disassembly if source mapping is unavailable but we have an offset
+		if resp.SourceLocation == "" && resp.WasmOffset != nil {
+			fmt.Println()
+			wasmBytes, err := os.ReadFile(wasmPath)
+			if err == nil {
+				fallbackMsg := wat.FormatFallback(wasmBytes, *resp.WasmOffset, 5)
+				fmt.Println(fallbackMsg)
+			}
+		}
+	} else {
+		fmt.Printf("%s Execution completed successfully\n", visualizer.Success())
+	}
 	fmt.Println()
 
 	if len(resp.Logs) > 0 {
@@ -862,6 +925,21 @@ func extractLedgerKeys(metaXdr string) ([]string, error) {
 		res = append(res, k)
 	}
 	return res, nil
+}
+
+// collectContractIDsFromDiagnosticEvents returns unique contract IDs from diagnostic events (trace).
+func collectContractIDsFromDiagnosticEvents(events []simulator.DiagnosticEvent) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, e := range events {
+		if e.ContractID != nil && *e.ContractID != "" {
+			if _, ok := seen[*e.ContractID]; !ok {
+				seen[*e.ContractID] = struct{}{}
+				ids = append(ids, *e.ContractID)
+			}
+		}
+	}
+	return ids
 }
 
 func printSimulationResult(network string, res *simulator.SimulationResponse) {
@@ -1005,7 +1083,7 @@ func diffResults(res1, res2 *simulator.SimulationResponse, net1, net2 string) {
 }
 
 func init() {
-	debugCmd.Flags().StringVarP(&networkFlag, "network", "n", "mainnet", "Stellar network")
+	debugCmd.Flags().StringVarP(&networkFlag, "network", "n", "mainnet", "Stellar network (auto-detected when omitted; testnet, mainnet, futurenet)")
 	debugCmd.Flags().StringVar(&rpcURLFlag, "rpc-url", "", "Custom RPC URL")
 	debugCmd.Flags().StringVar(&rpcTokenFlag, "rpc-token", "", "RPC authentication token (can also use ERST_RPC_TOKEN env var)")
 	debugCmd.Flags().BoolVar(&tracingEnabled, "tracing", false, "Enable tracing")
@@ -1029,6 +1107,73 @@ func init() {
 	debugCmd.Flags().StringVar(&ipfsNodeFlag, "ipfs-node", "", "Kubo-compatible IPFS HTTP RPC node URL (default: http://localhost:5001 or ERST_IPFS_NODE env)")
 	debugCmd.Flags().StringVar(&arweaveGatewayFlag, "arweave-gateway", "", "Arweave HTTP gateway URL (default: https://arweave.net or ERST_ARWEAVE_GATEWAY env)")
 	debugCmd.Flags().StringVar(&arweaveWalletFlag, "arweave-wallet", "", "Path to Arweave JWK wallet file for signing data transactions (or ERST_ARWEAVE_WALLET env)")
+	debugCmd.Flags().Int64Var(&mockTimeFlag, "mock-time", 0, "Fix the ledger timestamp for deterministic local simulation (Unix epoch seconds); 0 = disabled")
 
 	rootCmd.AddCommand(debugCmd)
+}
+func displaySourceLocation(loc *simulator.SourceLocation) {
+	fmt.Printf("%s Location: %s:%d:%d\n", visualizer.Symbol("location"), loc.File, loc.Line, loc.Column)
+
+	// Try to find the file
+	content, err := os.ReadFile(loc.File)
+	if err != nil {
+		// Try to find in current directory or src
+		if c, err := os.ReadFile(filepath.Join("src", loc.File)); err == nil {
+			content = c
+		} else {
+			return
+		}
+	}
+
+	lines := strings.Split(string(content), "\n")
+	if int(loc.Line) > len(lines) {
+		return
+	}
+
+	// Show context
+	start := int(loc.Line) - 3
+	if start < 0 {
+		start = 0
+	}
+	end := int(loc.Line) + 2
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	fmt.Println()
+	for i := start; i < end; i++ {
+		lineNum := i + 1
+		prefix := "  "
+		if lineNum == int(loc.Line) {
+			prefix = "> "
+		}
+
+		fmt.Printf("%s %4d | %s\n", prefix, lineNum, lines[i])
+
+		// Highlight the token if this is the failing line
+		if lineNum == int(loc.Line) {
+			// Calculate exact indentation to line up with the printed line
+			// prefix (2) + lineNum (4) + pipe (3) = 9 spaces
+			markerIndent := strings.Repeat(" ", 9)
+			offset := int(loc.Column) - 1
+			if offset < 0 {
+				offset = 0
+			}
+
+			highlightLen := 1
+			if loc.ColumnEnd != nil && *loc.ColumnEnd > loc.Column {
+				highlightLen = int(*loc.ColumnEnd - loc.Column)
+			}
+
+			// Don't exceed line length
+			if offset < len(lines[i]) {
+				if offset+highlightLen > len(lines[i]) {
+					highlightLen = len(lines[i]) - offset
+				}
+				marker := strings.Repeat(" ", offset) + strings.Repeat("^", highlightLen)
+				fmt.Printf("      | %s%s\n", markerIndent[:2], marker)
+			}
+		}
+	}
+	fmt.Println()
 }

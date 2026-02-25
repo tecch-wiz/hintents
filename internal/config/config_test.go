@@ -355,3 +355,95 @@ cache_path = "/cache"`
 		_ = cfg.parseTOML(content)
 	}
 }
+
+// ---- Crash reporting config -------------------------------------------------
+
+func TestParseTOML_CrashReportingFields(t *testing.T) {
+	content := `rpc_url = "https://test.com"
+network = "testnet"
+crash_reporting = true
+crash_endpoint = "https://custom.example.com/crash"
+crash_sentry_dsn = "https://key@o0.ingest.sentry.io/1"`
+
+	cfg := &Config{}
+	if err := cfg.parseTOML(content); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.CrashReporting {
+		t.Error("expected CrashReporting=true")
+	}
+	if cfg.CrashEndpoint != "https://custom.example.com/crash" {
+		t.Errorf("expected CrashEndpoint from TOML, got %q", cfg.CrashEndpoint)
+	}
+	if cfg.CrashSentryDSN != "https://key@o0.ingest.sentry.io/1" {
+		t.Errorf("expected CrashSentryDSN from TOML, got %q", cfg.CrashSentryDSN)
+	}
+}
+
+func TestParseTOML_CrashReportingDisabledByDefault(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.parseTOML(`rpc_url = "https://test.com"`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.CrashReporting {
+		t.Error("CrashReporting should default to false")
+	}
+	if cfg.CrashEndpoint != "" {
+		t.Errorf("CrashEndpoint should default to empty, got %q", cfg.CrashEndpoint)
+	}
+	if cfg.CrashSentryDSN != "" {
+		t.Errorf("CrashSentryDSN should default to empty, got %q", cfg.CrashSentryDSN)
+	}
+}
+
+func TestLoad_CrashReportingEnvVars(t *testing.T) {
+	keys := []string{
+		"ERST_CRASH_REPORTING",
+		"ERST_CRASH_ENDPOINT",
+		"ERST_SENTRY_DSN",
+	}
+	orig := make(map[string]string, len(keys))
+	for _, k := range keys {
+		orig[k] = os.Getenv(k)
+	}
+	defer func() {
+		for k, v := range orig {
+			os.Setenv(k, v)
+		}
+	}()
+
+	os.Setenv("ERST_CRASH_REPORTING", "true")
+	os.Setenv("ERST_CRASH_ENDPOINT", "https://custom.example.com/crash")
+	os.Setenv("ERST_SENTRY_DSN", "https://key@o0.ingest.sentry.io/2")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.CrashReporting {
+		t.Error("expected CrashReporting=true from ERST_CRASH_REPORTING")
+	}
+	if cfg.CrashEndpoint != "https://custom.example.com/crash" {
+		t.Errorf("expected CrashEndpoint from env, got %q", cfg.CrashEndpoint)
+	}
+	if cfg.CrashSentryDSN != "https://key@o0.ingest.sentry.io/2" {
+		t.Errorf("expected CrashSentryDSN from env, got %q", cfg.CrashSentryDSN)
+	}
+}
+
+func TestLoad_CrashReportingOffByDefault(t *testing.T) {
+	for _, k := range []string{"ERST_CRASH_REPORTING", "ERST_CRASH_ENDPOINT", "ERST_SENTRY_DSN"} {
+		os.Unsetenv(k)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.CrashReporting {
+		t.Error("CrashReporting should be off by default")
+	}
+}

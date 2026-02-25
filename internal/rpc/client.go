@@ -284,6 +284,27 @@ func NewCustomClient(config NetworkConfig) (*Client, error) {
 	}, nil
 }
 
+type GetHealthRequest struct {
+	Jsonrpc string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Method  string `json:"method"`
+}
+
+type GetHealthResponse struct {
+	Jsonrpc string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Result  struct {
+		Status                string `json:"status"`
+		LatestLedger          uint32 `json:"latestLedger"`
+		OldestLedger          uint32 `json:"oldestLedger"`
+		LedgerRetentionWindow uint32 `json:"ledgerRetentionWindow"`
+	} `json:"result"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
 // GetTransaction fetches the transaction details and full XDR data
 func (c *Client) GetTransaction(ctx context.Context, hash string) (*TransactionResponse, error) {
 	var failures []NodeFailure
@@ -768,5 +789,70 @@ func (c *Client) simulateTransactionAttempt(ctx context.Context, envelopeXdr str
 		return nil, errors.WrapRPCError(c.HorizonURL, rpcResp.Error.Message, rpcResp.Error.Code)
 	}
 
+	return &rpcResp, nil
+}
+
+// GetHealth checks the health of the Soroban RPC endpoint.
+func (c *Client) GetHealth(ctx context.Context) (*GetHealthResponse, error) {
+	for attempt := 0; attempt < len(c.AltURLs); attempt++ {
+		resp, err := c.getHealthAttempt(ctx)
+		if err == nil {
+			return resp, nil
+		}
+
+		if attempt < len(c.AltURLs)-1 {
+			logger.Logger.Warn("Retrying GetHealth with fallback RPC...", "error", err)
+			if !c.rotateURL() {
+				break
+			}
+			continue
+		}
+		return nil, err
+	}
+	return nil, fmt.Errorf("all Soroban RPC endpoints failed for GetHealth")
+}
+
+func (c *Client) getHealthAttempt(ctx context.Context) (*GetHealthResponse, error) {
+	logger.Logger.Debug("Checking Soroban RPC health", "url", c.SorobanURL)
+
+	reqBody := GetHealthRequest{
+		Jsonrpc: "2.0",
+		ID:      1,
+		Method:  "getHealth",
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	targetURL := c.SorobanURL
+	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request to %s: %w", targetURL, err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var rpcResp GetHealthResponse
+	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("rpc error from %s: %s (code %d)", targetURL, rpcResp.Error.Message, rpcResp.Error.Code)
+	}
+
+	logger.Logger.Info("Soroban RPC health check successful", "url", targetURL, "status", rpcResp.Result.Status)
 	return &rpcResp, nil
 }

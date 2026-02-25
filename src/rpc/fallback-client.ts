@@ -324,10 +324,19 @@ export class FallbackRPCClient {
         const checks = this.endpoints.map(async (endpoint) => {
             try {
                 const client = this.clients.get(endpoint.url)!;
-                await client.get('/health', { timeout: 5000 });
+                const response = await client.post('', {
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'getHealth'
+                }, { timeout: 5000 });
 
-                this.markSuccess(endpoint);
-                console.log(`    ${endpoint.url}`);
+                if (response.data && response.data.result && response.data.result.status === 'healthy') {
+                    this.markSuccess(endpoint);
+                    console.log(`    ${endpoint.url} (healthy)`);
+                } else {
+                    this.markFailure(endpoint);
+                    console.log(`   [FAIL] ${endpoint.url} (invalid response)`);
+                }
             } catch (error) {
                 this.markFailure(endpoint);
                 console.log(`   [FAIL] ${endpoint.url}`);
