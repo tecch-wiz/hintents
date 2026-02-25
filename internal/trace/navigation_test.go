@@ -187,8 +187,8 @@ func TestExecutionTrace_JSONSerialization(t *testing.T) {
 	// Add some states
 	states := []ExecutionState{
 		{Operation: "init", ContractID: "contract1"},
-		{Operation: "call", Function: "test", Arguments: []interface{}{"arg1", 42}},
-		{Operation: "return", ReturnValue: "result"},
+		{Operation: "call", Function: "test", Arguments: []interface{}{"arg1", 42}, RawArguments: []string{"AAAAAQ==", "AAAAAg=="}},
+		{Operation: "return", ReturnValue: "result", RawReturnValue: "AAAAAw=="},
 	}
 
 	for _, state := range states {
@@ -225,6 +225,14 @@ func TestExecutionTrace_JSONSerialization(t *testing.T) {
 	}
 	if state.Operation != "call" {
 		t.Errorf("Expected operation 'call', got '%s'", state.Operation)
+	}
+	if len(state.RawArguments) != 2 || state.RawArguments[0] != "AAAAAQ==" {
+		t.Errorf("RawArguments not restored correctly")
+	}
+
+	state, _ = restored.StepForward()
+	if state.RawReturnValue != "AAAAAw==" {
+		t.Errorf("RawReturnValue not restored correctly")
 	}
 }
 

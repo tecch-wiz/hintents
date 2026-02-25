@@ -11,6 +11,18 @@ import (
 
 // ExecutionState represents the state at a specific point in execution
 type ExecutionState struct {
+	Step           int                    `json:"step"`
+	Timestamp      time.Time              `json:"timestamp"`
+	Operation      string                 `json:"operation"`
+	ContractID     string                 `json:"contract_id,omitempty"`
+	Function       string                 `json:"function,omitempty"`
+	Arguments      []interface{}          `json:"arguments,omitempty"`
+	RawArguments   []string               `json:"raw_arguments,omitempty"`
+	ReturnValue    interface{}            `json:"return_value,omitempty"`
+	RawReturnValue string                 `json:"raw_return_value,omitempty"`
+	Error          string                 `json:"error,omitempty"`
+	HostState      map[string]interface{} `json:"host_state,omitempty"`
+	Memory         map[string]interface{} `json:"memory,omitempty"`
 	Step        int                    `json:"step"`
 	Timestamp   time.Time              `json:"timestamp"`
 	Operation   string                 `json:"operation"`
@@ -131,7 +143,9 @@ func (t *ExecutionTrace) reconstructStateUpTo(step int) (*ExecutionState, error)
 			reconstructedState.ContractID = state.ContractID
 			reconstructedState.Function = state.Function
 			reconstructedState.Arguments = state.Arguments
+			reconstructedState.RawArguments = state.RawArguments
 			reconstructedState.ReturnValue = state.ReturnValue
+			reconstructedState.RawReturnValue = state.RawReturnValue
 			reconstructedState.Error = state.Error
 		}
 
@@ -235,7 +249,9 @@ func (t *ExecutionTrace) ReconstructStateAt(step int) (*ExecutionState, error) {
 			reconstructedState.ContractID = state.ContractID
 			reconstructedState.Function = state.Function
 			reconstructedState.Arguments = state.Arguments
+			reconstructedState.RawArguments = state.RawArguments
 			reconstructedState.ReturnValue = state.ReturnValue
+			reconstructedState.RawReturnValue = state.RawReturnValue
 			reconstructedState.Error = state.Error
 		}
 

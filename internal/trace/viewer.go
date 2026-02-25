@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/dotandev/hintents/internal/dwarf"
 	"github.com/dotandev/hintents/internal/visualizer"
 )
@@ -188,6 +189,12 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 	case "q", "quit", "exit":
 		fmt.Printf("Goodbye! %s\n", visualizer.Symbol("wave"))
 		return true
+	case "y", "yank", "copy":
+		if len(parts) > 1 {
+			v.handleYank(parts[1:])
+		} else {
+			fmt.Println("Usage: yank <a/r> [index]")
+		}
 	default:
 		fmt.Printf("Unknown command: %s. Type 'help' for available commands.\n", cmdExact)
 	}
@@ -538,8 +545,63 @@ func (v *InteractiveViewer) showHelp() {
 	fmt.Println("  ESC                     - Clear search / cancel input")
 	fmt.Println()
 	fmt.Println("Other:")
+	fmt.Println("  h, help              - Show this help")
+	fmt.Println("  y, yank <a/r> [idx]  - Copy raw XDR (a: arg, r: return)")
+	fmt.Println("  q, quit, exit        - Exit viewer")
 	fmt.Println("  ?, h, help              - Show this help")
 	fmt.Println("  q, quit, exit           - Exit viewer")
+}
+
+// handleYank copies raw XDR values to the clipboard
+func (v *InteractiveViewer) handleYank(args []string) {
+	state, err := v.trace.GetCurrentState()
+	if err != nil {
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
+		return
+	}
+
+	subcmd := strings.ToLower(args[0])
+	var value string
+
+	switch subcmd {
+	case "a", "arg", "argument":
+		index := 0
+		if len(args) > 1 {
+			index, err = strconv.Atoi(args[1])
+			if err != nil {
+				fmt.Printf("%s Invalid argument index: %s\n", visualizer.Error(), args[1])
+				return
+			}
+		}
+
+		if index < 0 || index >= len(state.RawArguments) {
+			fmt.Printf("%s Argument index %d out of bounds (0-%d)\n",
+				visualizer.Error(), index, len(state.RawArguments)-1)
+			return
+		}
+		value = state.RawArguments[index]
+
+	case "r", "ret", "return":
+		if state.RawReturnValue == "" {
+			fmt.Printf("%s No raw return value available at this step\n", visualizer.Error())
+			return
+		}
+		value = state.RawReturnValue
+
+	default:
+		fmt.Printf("%s Unknown yank subcommand: %s. Use 'a' for arguments or 'r' for return value.\n",
+			visualizer.Error(), subcmd)
+		return
+	}
+
+	if err := clipboard.WriteAll(value); err != nil {
+		fmt.Printf("%s Failed to copy to clipboard: %v\n", visualizer.Error(), err)
+		// Fallback: just print it so the user can see it
+		fmt.Printf("Raw XDR: %s\n", value)
+		return
+	}
+
+	fmt.Printf("%s Copied raw XDR to clipboard\n", visualizer.Symbol("sparkles"))
 }
 
 // Helper functions
