@@ -16,6 +16,10 @@ import (
 
 // InteractiveViewer provides a terminal-based interactive trace navigation interface
 type InteractiveViewer struct {
+	trace        *ExecutionTrace
+	reader       *bufio.Reader
+	eventFilter  string   // one of EventTypeTrap, EventTypeContractCall, EventTypeHostFunction, EventTypeAuth, or ""
+	filterCycle  []string // order for cycling: off, trap, contract_call, host_function, auth
 	trace  *ExecutionTrace
 	reader *bufio.Reader
 	trap   *TrapInfo
@@ -24,6 +28,11 @@ type InteractiveViewer struct {
 
 // NewInteractiveViewer creates a new interactive trace viewer
 func NewInteractiveViewer(trace *ExecutionTrace) *InteractiveViewer {
+	return &InteractiveViewer{
+		trace:       trace,
+		reader:      bufio.NewReader(os.Stdin),
+		eventFilter: "",
+		filterCycle: []string{"", EventTypeTrap, EventTypeContractCall, EventTypeHostFunction, EventTypeAuth},
 	viewer := &InteractiveViewer{
 		trace:  trace,
 		reader: bufio.NewReader(os.Stdin),
@@ -124,6 +133,8 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 		v.stepForward()
 	case "p", "prev", "back", "backward":
 		v.stepBackward()
+	case "f", "filter":
+		v.cycleEventFilter()
 	case "j", "jump":
 		if len(parts) > 1 {
 			v.jumpToStep(parts[1])
@@ -148,7 +159,7 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 		} else {
 			v.listSteps("10")
 		}
-	case "h", "help":
+	case "?", "h", "help":
 		v.showHelp()
 	case "q", "quit", "exit":
 		fmt.Printf("Goodbye! %s\n", visualizer.Symbol("wave"))
@@ -160,6 +171,17 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 	return false
 }
 
+// stepForward moves to the next step (respects event type filter when set)
+func (v *InteractiveViewer) stepForward() {
+	var state *ExecutionState
+	var err error
+	if v.eventFilter != "" {
+		state, err = v.trace.FilteredStepForward(v.eventFilter)
+	} else {
+		state, err = v.trace.StepForward()
+	}
+	if err != nil {
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
 // stepForward moves to the next step, skipping core::* if hideStdLib is true
 func (v *InteractiveViewer) stepForward() {
 	for {
@@ -179,6 +201,17 @@ func (v *InteractiveViewer) stepForward() {
 	}
 }
 
+// stepBackward moves to the previous step (respects event type filter when set)
+func (v *InteractiveViewer) stepBackward() {
+	var state *ExecutionState
+	var err error
+	if v.eventFilter != "" {
+		state, err = v.trace.FilteredStepBackward(v.eventFilter)
+	} else {
+		state, err = v.trace.StepBackward()
+	}
+	if err != nil {
+		fmt.Printf("%s %s\n", visualizer.Error(), err)
 // stepBackward moves to the previous step, skipping core::* if hideStdLib is true
 func (v *InteractiveViewer) stepBackward() {
 	for {
@@ -195,6 +228,23 @@ func (v *InteractiveViewer) stepBackward() {
 		fmt.Printf("%s  Stepped backward to step %d\n", visualizer.Symbol("arrow_l"), state.Step)
 		v.displayCurrentState()
 		return
+	}
+}
+
+// cycleEventFilter cycles through filter options: off -> trap -> contract_call -> host_function -> auth -> off
+func (v *InteractiveViewer) cycleEventFilter() {
+	for i, f := range v.filterCycle {
+		if f == v.eventFilter {
+			next := (i + 1) % len(v.filterCycle)
+			v.eventFilter = v.filterCycle[next]
+			break
+		}
+	}
+	if v.eventFilter == "" {
+		fmt.Println("Filter: off (all steps)")
+	} else {
+		matching := v.trace.FilteredStepCount(v.eventFilter)
+		fmt.Printf("Filter: %s (%d matching steps)\n", v.eventFilter, matching)
 	}
 }
 
@@ -226,7 +276,13 @@ func (v *InteractiveViewer) displayCurrentState() {
 
 	fmt.Printf("\n%s Current State\n", visualizer.Symbol("pin"))
 	fmt.Println("================")
-	fmt.Printf("Step: %d/%d\n", state.Step, len(v.trace.States)-1)
+	if v.eventFilter != "" {
+		filteredIdx := v.trace.FilteredCurrentIndex(v.eventFilter)
+		filteredTotal := v.trace.FilteredStepCount(v.eventFilter)
+		fmt.Printf("Step: %d/%d (filter %s: %d/%d)\n", state.Step, len(v.trace.States)-1, v.eventFilter, filteredIdx, filteredTotal)
+	} else {
+		fmt.Printf("Step: %d/%d\n", state.Step, len(v.trace.States)-1)
+	}
 	fmt.Printf("Time: %s\n", state.Timestamp.Format("15:04:05.000"))
 	fmt.Printf("Operation: %s\n", state.Operation)
 
@@ -327,6 +383,12 @@ func (v *InteractiveViewer) showNavigationInfo() {
 	fmt.Println("==================")
 	fmt.Printf("Total Steps: %d\n", info["total_steps"])
 	fmt.Printf("Current Step: %d\n", info["current_step"])
+	if v.eventFilter != "" {
+		fmt.Printf("Filter: %s (%d matching)\n", v.eventFilter, v.trace.FilteredStepCount(v.eventFilter))
+		fmt.Printf("Filtered Index: %d\n", v.trace.FilteredCurrentIndex(v.eventFilter))
+	} else {
+		fmt.Printf("Filter: off\n")
+	}
 	fmt.Printf("Can Step Back: %t\n", info["can_step_back"])
 	fmt.Printf("Can Step Forward: %t\n", info["can_step_forward"])
 	fmt.Printf("Snapshots: %d\n", info["snapshots_count"])
@@ -360,6 +422,8 @@ func (v *InteractiveViewer) listSteps(countStr string) {
 	end := min(len(v.trace.States)-1, start+count-1)
 
 	fmt.Printf("\n%s Steps %d-%d\n", visualizer.Symbol("list"), start, end)
+	if v.eventFilter != "" {
+		fmt.Printf("Filter: %s\n", v.eventFilter)
 	if v.hideStdLib {
 		fmt.Println("(Filtering out core::* traces)")
 	}
@@ -377,6 +441,12 @@ func (v *InteractiveViewer) listSteps(countStr string) {
 		if i == current {
 			marker = visualizer.Symbol("play")
 		}
+		typeTag := ""
+		if v.eventFilter != "" && v.trace.StepMatchesFilter(i, v.eventFilter) {
+			typeTag = " [" + v.eventFilter + "]"
+		} else if v.eventFilter != "" {
+			typeTag = " (" + ClassifyEventType(state) + ")"
+		}
 
 		fmt.Printf("%s %3d: %s", marker, i, state.Operation)
 		if state.Function != "" {
@@ -385,19 +455,36 @@ func (v *InteractiveViewer) listSteps(countStr string) {
 		if state.Error != "" {
 			fmt.Printf(" %s", visualizer.Error())
 		}
-		fmt.Println()
+		fmt.Printf("%s\n", typeTag)
 	}
 }
 
-// showHelp displays available commands
+// showHelp displays available keyboard shortcuts as an overlay/modal
 func (v *InteractiveViewer) showHelp() {
-	fmt.Printf("\n%s Available Commands\n", visualizer.Symbol("book"))
-	fmt.Println("=====================")
+	// we treat this as a modal overlay; just print a bordered section
+	fmt.Printf("\n%s Keyboard Shortcuts\n", visualizer.Symbol("book"))
+	fmt.Println("======================")
 	fmt.Println("Navigation:")
-	fmt.Println("  n, next, forward     - Step forward")
-	fmt.Println("  p, prev, back        - Step backward")
-	fmt.Println("  j, jump <step>       - Jump to specific step")
+	fmt.Println("  n, next, forward        - Step forward")
+	fmt.Println("  p, prev, back           - Step backward")
+	fmt.Println("  j, jump <step>          - Jump to specific step")
 	fmt.Println()
+	fmt.Println("Display/Tree:")
+	fmt.Println("  s, show, state          - Show current state")
+	fmt.Println("  r, reconstruct [step]   - Reconstruct state")
+	fmt.Println("  l, list [count]         - List steps (default: 10)")
+	fmt.Println("  e                       - Expand all nodes")
+	fmt.Println("  c                       - Collapse all nodes")
+	fmt.Println("  v                       - Toggle view modes")
+	fmt.Println()
+	fmt.Println("Filter:")
+	fmt.Println("  f, filter            - Cycle filter by event type (trap, contract_call, host_function, auth)")
+	fmt.Println()
+	fmt.Println("Search:")
+	fmt.Println("  /                       - Start search")
+	fmt.Println("  n                       - Next search match")
+	fmt.Println("  N                       - Previous search match")
+	fmt.Println("  ESC                     - Clear search / cancel input")
 	fmt.Println("Display:")
 	fmt.Println("  s, show, state       - Show current state")
 	fmt.Println("  S                    - Toggle hiding/showing Rust core::* traces")
@@ -407,8 +494,8 @@ func (v *InteractiveViewer) showHelp() {
 	fmt.Println("  i, info              - Show navigation info")
 	fmt.Println()
 	fmt.Println("Other:")
-	fmt.Println("  h, help              - Show this help")
-	fmt.Println("  q, quit, exit        - Exit viewer")
+	fmt.Println("  ?, h, help              - Show this help overlay")
+	fmt.Println("  q, quit, exit           - Exit viewer")
 }
 
 // Helper functions

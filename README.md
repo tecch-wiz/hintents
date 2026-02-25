@@ -42,6 +42,7 @@ Launch an interactive terminal UI to explore transaction execution traces with s
 **Features:**
 
 - **Search**: Press `/` to search through traces (contract IDs, functions, errors)
+- **Help overlay**: Press `?` or `h` to see all keyboard shortcuts
 - **Tree Navigation**: Expand/collapse nodes, navigate with arrow keys
 - **Syntax Highlighting**: Color-coded contract IDs, functions, and errors
 - **Fast Navigation**: Jump between search matches with `n`/`N`

@@ -67,8 +67,18 @@ export class TraceItem extends vscode.TreeItem {
             isStateUpdate ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
         );
 
-        this.tooltip = `${this.label}`;
-        this.description = step.error ? `Error: ${step.error}` : '';
+        // Build budget metrics display
+        const budgetParts: string[] = [];
+        if (step.cpu_delta !== undefined && step.cpu_delta > 0) {
+            budgetParts.push(`CPU: ${this.formatNumber(step.cpu_delta)}`);
+        }
+        if (step.memory_delta !== undefined && step.memory_delta > 0) {
+            budgetParts.push(`Mem: ${this.formatBytes(step.memory_delta)}`);
+        }
+        const budgetInfo = budgetParts.length > 0 ? ` [${budgetParts.join(', ')}]` : '';
+
+        this.tooltip = `${this.label}${budgetInfo}`;
+        this.description = step.error ? `Error: ${step.error}` : budgetInfo;
         this.contextValue = 'traceStep';
 
         if (step.error) {
@@ -86,6 +96,24 @@ export class TraceItem extends vscode.TreeItem {
                 arguments: [this]
             };
         }
+    }
+
+    private formatNumber(num: number): string {
+        if (num >= 1000000) {
+            return `${(num / 1000000).toFixed(2)}M`;
+        } else if (num >= 1000) {
+            return `${(num / 1000).toFixed(2)}K`;
+        }
+        return num.toString();
+    }
+
+    private formatBytes(bytes: number): string {
+        if (bytes >= 1048576) {
+            return `${(bytes / 1048576).toFixed(2)}MB`;
+        } else if (bytes >= 1024) {
+            return `${(bytes / 1024).toFixed(2)}KB`;
+        }
+        return `${bytes}B`;
     }
 }
 

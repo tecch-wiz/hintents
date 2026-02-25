@@ -15,6 +15,8 @@ export interface TraceStep {
     error?: string;
     host_state?: any;
     memory?: any;
+    cpu_delta?: number;
+    memory_delta?: number;
 }
 
 export interface Trace {

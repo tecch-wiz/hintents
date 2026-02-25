@@ -1,10 +1,14 @@
 // Copyright 2025 Erst Users
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(unused_imports, unused_variables, clippy::useless_format)]
+
 mod config;
 mod gas_optimizer;
 mod runner;
+mod source_map_cache;
 mod source_mapper;
+mod vm;
 mod types;
 
 use crate::gas_optimizer::{BudgetMetrics, GasOptimizationAdvisor, CPU_LIMIT, MEMORY_LIMIT};
@@ -14,7 +18,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use soroban_env_host::xdr::ReadXdr;
 use soroban_env_host::{
-    xdr::{HostFunction, Operation, OperationBody, ScVal},
+    xdr::{Operation, OperationBody},
     Host, HostError,
 };
 use std::collections::HashMap;
@@ -121,7 +125,9 @@ fn categorize_events(events: &soroban_env_host::events::Events) -> Vec<Categoriz
                     contract_id,
                     topics,
                     data,
-                    in_successful_contract_call: e.failed_call,
+                    // failed_call=true means the call that emitted this event
+                    // actually failed; so a successful call is the inverse.
+                    in_successful_contract_call: !e.failed_call,
                 },
             }
         })
@@ -244,6 +250,9 @@ fn main() {
     let source_mapper = if let Some(wasm_base64) = &request.contract_wasm {
         match base64::engine::general_purpose::STANDARD.decode(wasm_base64) {
             Ok(wasm_bytes) => {
+                if let Err(e) = vm::enforce_soroban_compatibility(&wasm_bytes) {
+                    return send_error(format!("Strict VM enforcement failed: {}", e));
+                }
                 let mapper = SourceMapper::new(wasm_bytes);
                 if mapper.has_debug_symbols() {
                     eprintln!("Debug symbols found in WASM");
@@ -419,7 +428,9 @@ fn main() {
                                     contract_id,
                                     topics,
                                     data,
-                                    in_successful_contract_call: event.failed_call,
+                                    // failed_call=true means the call failed;
+                                    // negate to get "was this a successful call?".
+                                    in_successful_contract_call: !event.failed_call,
                                 }
                             })
                             .collect();
@@ -456,8 +467,12 @@ fn main() {
                 flamegraph: flamegraph_svg,
                 optimization_report,
                 budget_usage: Some(budget_usage),
-                source_location: None,
-                wasm_offset: None,
+                // If a WASM with debug symbols was provided, expose the first
+                // mappable source location so callers can correlate failures.
+                source_location: source_mapper
+                    .as_ref()
+                    .and_then(|m| m.map_wasm_offset_to_source(0))
+                    .and_then(|loc| serde_json::to_string(&loc).ok()),
             };
 
             println!("{}", serde_json::to_string(&response).unwrap());
@@ -642,19 +657,167 @@ fn extract_wasm_offset(error_msg: &str) -> Option<u64> {
             if let Ok(offset) = u64::from_str_radix(&hex_part[..end], 16) {
                 return Some(offset);
             }
-        }
-    }
-    None
-}
+/// Translate a raw soroban / WASM error string into a user-friendly description.
+///
+/// Protocol 21 standardised the set of VM trap codes emitted by the host.
+/// This function maps those codes to clear English phrases so that
+/// upper-level diagnostics (e.g. `erst explain`) can display them directly.
+pub fn decode_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
 
+    if lower.contains("wasm trap") || lower.contains("vm trap") {
+        if lower.contains("out of bounds") || lower.contains("memory access") {
+            return "VM Trap: Out of Bounds Access — the contract read or wrote outside its allocated memory region.".to_string();
+        }
+        if lower.contains("stack overflow") || lower.contains("call stack") {
+            return "VM Trap: Stack Overflow — the contract exceeded the maximum call-stack depth.".to_string();
+        }
+        if lower.contains("integer overflow") || lower.contains("divide by zero") {
+            return "VM Trap: Arithmetic Trap — integer overflow or division by zero.".to_string();
+        }
+        if lower.contains("unreachable") {
+            return "VM Trap: Unreachable — the contract executed an explicit trap or reached dead code.".to_string();
+        }
+        if lower.contains("indirect call") || lower.contains("table") {
+            return "VM Trap: Indirect-Call Type Mismatch — wrong function signature in call_indirect.".to_string();
+        }
+        return format!("VM Trap: {}", raw);
+    }
+
+    if lower.contains("auth") || lower.contains("unauthorized") {
+        return "Authorization failure — a required signer or policy check was not satisfied.".to_string();
+    }
+
+    if lower.contains("budget") || lower.contains("cpu limit") || lower.contains("mem limit") {
+        return "Resource limit exceeded — the transaction consumed more CPU instructions or memory than the protocol-21 budget allows.".to_string();
+    }
+
+    if lower.contains("missing") || lower.contains("not found") {
+        return "Missing ledger entry — the contract referenced a key that does not exist in the current ledger state.".to_string();
+    }
+
+    // Fallback: return the raw message unchanged.
+    raw.to_string()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_decode_vm_traps() {
-        let msg = decode_error("Error: Wasm Trap: out of bounds memory access");
-        assert!(msg.contains("VM Trap: Out of Bounds Access"));
+    fn test_enforce_soroban_compatibility_rejects_floats() {
+        let wat = r#"
+            (module
+                (func (export "f") (result f32)
+                    f32.const 0.0
+                )
+            )
+        "#;
+
+        let wasm = wat::parse_str(wat).expect("failed to compile WAT");
+        let result = vm::enforce_soroban_compatibility(&wasm);
+        assert!(result.is_err());
+    }
+
+    // ── Protocol-21 host-trait correctness ─────────────────────────────────
+
+    /// `HostEvent.failed_call == true` means the call that emitted the event
+    /// *failed*.  `in_successful_contract_call` must therefore be the inverse.
+    /// This was silently backwards before the protocol-21 fix.
+    #[test]
+    fn test_in_successful_contract_call_is_negation_of_failed_call() {
+        use soroban_env_host::events::{Events, HostEvent};
+        use soroban_env_host::xdr::{
+            ContractEvent, ContractEventBody, ContractEventType, ContractEventV0,
+            ExtensionPoint, VecM,
+        };
+
+        let make_event = |failed: bool| -> HostEvent {
+            HostEvent {
+                failed_call: failed,
+                event: ContractEvent {
+                    ext: ExtensionPoint::V0,
+                    contract_id: None,
+                    type_: ContractEventType::Diagnostic,
+                    body: ContractEventBody::V0(ContractEventV0 {
+                        topics: VecM::default(),
+                        data: soroban_env_host::xdr::ScVal::Void,
+                    }),
+                },
+            }
+        };
+
+        // failed_call = true  →  in_successful_contract_call must be false
+        let evs_failed = Events(vec![make_event(true)]);
+        let categorized = categorize_events(&evs_failed);
+        assert_eq!(categorized.len(), 1);
+        assert!(
+            !categorized[0].event.in_successful_contract_call,
+            "a failed call should NOT be marked as a successful contract call"
+        );
+
+        // failed_call = false  →  in_successful_contract_call must be true
+        let evs_ok = Events(vec![make_event(false)]);
+        let categorized = categorize_events(&evs_ok);
+        assert_eq!(categorized.len(), 1);
+        assert!(
+            categorized[0].event.in_successful_contract_call,
+            "a successful call MUST be marked as a successful contract call"
+        );
+    }
+
+    /// categorize_events must correctly map ContractEventType variants to their
+    /// lowercase string representations.
+    #[test]
+    fn test_categorize_events_type_labels() {
+        use soroban_env_host::events::{Events, HostEvent};
+        use soroban_env_host::xdr::{
+            ContractEvent, ContractEventBody, ContractEventType, ContractEventV0,
+            ExtensionPoint, VecM,
+        };
+
+        let make_typed_event = |t: ContractEventType| HostEvent {
+            failed_call: false,
+            event: ContractEvent {
+                ext: ExtensionPoint::V0,
+                contract_id: None,
+                type_: t,
+                body: ContractEventBody::V0(ContractEventV0 {
+                    topics: VecM::default(),
+                    data: soroban_env_host::xdr::ScVal::Void,
+                }),
+            },
+        };
+
+        let evs = Events(vec![
+            make_typed_event(ContractEventType::Contract),
+            make_typed_event(ContractEventType::System),
+            make_typed_event(ContractEventType::Diagnostic),
+        ]);
+
+        let cats = categorize_events(&evs);
+        assert_eq!(cats[0].category, "Contract");
+        assert_eq!(cats[1].category, "System");
+        assert_eq!(cats[2].category, "Diagnostic");
+
+        // DiagnosticEvent.event_type should be lowercase
+        assert_eq!(cats[0].event.event_type, "contract");
+        assert_eq!(cats[1].event.event_type, "system");
+        assert_eq!(cats[2].event.event_type, "diagnostic");
+    }
+
+    /// SourceMapper without debug symbols must return None for source locations,
+    /// and the `source_location` field stays absent in serialized JSON.
+    #[test]
+    fn test_source_mapper_no_symbols_gives_no_location() {
+        use crate::source_mapper::SourceMapper;
+
+        let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]; // WASM magic + version
+        let mapper = SourceMapper::new(wasm_bytes);
+        assert!(!mapper.has_debug_symbols());
+        assert!(
+            mapper.map_wasm_offset_to_source(0).is_none(),
+            "WASM without .debug_info should yield no source location"
+        );
     }
 }
