@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dotandev/hintents/internal/dwarf"
 	"github.com/dotandev/hintents/internal/visualizer"
 )
 
@@ -17,14 +18,44 @@ import (
 type InteractiveViewer struct {
 	trace  *ExecutionTrace
 	reader *bufio.Reader
+	trap   *TrapInfo
+	dwarfParser *dwarf.Parser
 }
 
 // NewInteractiveViewer creates a new interactive trace viewer
 func NewInteractiveViewer(trace *ExecutionTrace) *InteractiveViewer {
-	return &InteractiveViewer{
+	viewer := &InteractiveViewer{
 		trace:  trace,
 		reader: bufio.NewReader(os.Stdin),
 	}
+
+	// Detect any traps in the trace
+	detector := &TrapDetector{}
+	viewer.trap = detector.FindTrapPoint(trace)
+
+	return viewer
+}
+
+// NewInteractiveViewerWithWASM creates a new interactive trace viewer with WASM data for local variable inspection
+func NewInteractiveViewerWithWASM(trace *ExecutionTrace, wasmData []byte) *InteractiveViewer {
+	viewer := &InteractiveViewer{
+		trace:  trace,
+		reader: bufio.NewReader(os.Stdin),
+	}
+
+	// Initialize DWARF parser if WASM data is provided
+	if len(wasmData) > 0 {
+		parser, err := dwarf.NewParser(wasmData)
+		if err == nil && parser.HasDebugInfo() {
+			viewer.dwarfParser = parser
+		}
+	}
+
+	// Detect any traps in the trace
+	detector := &TrapDetector{}
+	viewer.trap = detector.FindTrapPoint(trace)
+
+	return viewer
 }
 
 // Start begins the interactive trace viewing session
@@ -33,6 +64,16 @@ func (v *InteractiveViewer) Start() error {
 	fmt.Println("=================================")
 	fmt.Printf("Transaction: %s\n", v.trace.TransactionHash)
 	fmt.Printf("Total Steps: %d\n\n", len(v.trace.States))
+
+	// Show trap info at startup if detected
+	if v.trap != nil {
+		fmt.Printf("%s Memory Trap Detected!\n", visualizer.Symbol("warn"))
+		fmt.Printf("Type: %s\n", v.trap.Type)
+		if v.trap.SourceLocation != nil {
+			fmt.Printf("Location: %s:%d\n", v.trap.SourceLocation.File, v.trap.SourceLocation.Line)
+		}
+		fmt.Println("  Use 't' or 'trap' command to see local variables\n")
+	}
 
 	v.showHelp()
 	v.displayCurrentState()
@@ -85,6 +126,8 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 		} else {
 			v.reconstructCurrentState()
 		}
+	case "t", "trap":
+		v.displayTrapInfo()
 	case "i", "info":
 		v.showNavigationInfo()
 	case "l", "list":
@@ -175,6 +218,10 @@ func (v *InteractiveViewer) displayCurrentState() {
 	}
 	if state.Error != "" {
 		fmt.Printf("%s Error: %s\n", visualizer.Error(), state.Error)
+		// Suggest using trap command
+		if v.trap != nil && IsMemoryTrap(v.trap) {
+			fmt.Println("\n  Use 't' or 'trap' to see local variables at this point")
+		}
 	}
 
 	// Show memory/state summary
@@ -257,6 +304,22 @@ func (v *InteractiveViewer) showNavigationInfo() {
 	fmt.Printf("Can Step Back: %t\n", info["can_step_back"])
 	fmt.Printf("Can Step Forward: %t\n", info["can_step_forward"])
 	fmt.Printf("Snapshots: %d\n", info["snapshots_count"])
+
+	// Show trap info if detected
+	if v.trap != nil {
+		fmt.Printf("\n%s Trap Detected: %s\n", visualizer.Error(), v.trap.Type)
+		fmt.Println("  Type 't' or 'trap' to see details with local variables")
+	}
+}
+
+// displayTrapInfo displays trap information including local variables
+func (v *InteractiveViewer) displayTrapInfo() {
+	if v.trap == nil {
+		fmt.Printf("%s No trap detected in this trace\n", visualizer.Symbol("check"))
+		return
+	}
+
+	fmt.Println("\n" + FormatTrapInfo(v.trap))
 }
 
 // listSteps shows a list of steps around the current position
@@ -303,6 +366,7 @@ func (v *InteractiveViewer) showHelp() {
 	fmt.Println("Display:")
 	fmt.Println("  s, show, state       - Show current state")
 	fmt.Println("  r, reconstruct [step] - Reconstruct state")
+	fmt.Println("  t, trap              - Show trap info with local variables")
 	fmt.Println("  l, list [count]      - List steps (default: 10)")
 	fmt.Println("  i, info              - Show navigation info")
 	fmt.Println()
