@@ -713,3 +713,34 @@ The Rust simulator returns a JSON object with the execution status, logs, and an
   "logs": ["Host Initialized", "Charged 100 fee"]
 }
 ```
+
+---
+
+## SDK Middleware
+
+The SDK type system supports custom middleware injection via `SDKMiddleware`.
+Middleware functions intercept requests flowing through `FallbackRPCClient`,
+following a composable `(ctx, next) => response` pattern.
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `SDKContext` | Request context carrying path, method, data, headers, and metadata |
+| `SDKResponse<T>` | Response wrapper with data, status, duration, endpoint, and metadata |
+| `SDKMiddleware<T>` | `(ctx: SDKContext, next: NextFn<T>) => Promise<SDKResponse<T>>` |
+| `NextFn<T>` | Calls the next middleware or the core handler |
+| `composeMiddleware` | Composes an array of middleware into a single chain |
+
+### Registration
+
+Middleware can be registered in two ways:
+
+1. **Via config** — pass `middleware` array in `RPCConfig`
+2. **Via `use()`** — call `client.use(mw)` on a `FallbackRPCClient` instance
+
+### Execution Order
+
+Middleware executes in registration order (first registered runs first).
+Each middleware calls `next(ctx)` to pass control to the next in the chain.
+Middleware may short-circuit by returning a response without calling `next`.
