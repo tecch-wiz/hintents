@@ -12,6 +12,7 @@ import (
 	"runtime"
 
 	"github.com/dotandev/hintents/internal/errors"
+	"github.com/dotandev/hintents/internal/ipc"
 	"github.com/dotandev/hintents/internal/logger"
 )
 
@@ -179,6 +180,17 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
 		logger.Logger.Error("Failed to unmarshal response", "error", err)
 		return nil, errors.WrapUnmarshalFailed(err, stdout.String())
+	}
+
+	// If the simulator returned a logical error inside the response payload,
+	// classify it into a unified ErstError before returning to the caller.
+	if resp.Error != "" {
+		classified := ipc.Error{Message: resp.Error}.ToErstError()
+		logger.Logger.Error("Simulator returned error",
+			"code", classified.Code,
+			"original", classified.OriginalError,
+		)
+		return nil, classified
 	}
 
 	resp.ProtocolVersion = &proto.Version

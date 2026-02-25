@@ -858,34 +858,34 @@ func (c *Client) getHealthAttempt(ctx context.Context) (*GetHealthResponse, erro
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, errors.NewRPCError(errors.CodeRPCMarshalFailed, err)
 	}
 
 	targetURL := c.SorobanURL
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, errors.NewRPCError(errors.CodeRPCConnectionFailed, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.getHTTPClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request to %s: %w", targetURL, err)
+		return nil, errors.NewRPCError(errors.CodeRPCConnectionFailed, err)
 	}
 	defer resp.Body.Close()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, errors.NewRPCError(errors.CodeRPCUnmarshalFailed, err)
 	}
 
 	var rpcResp GetHealthResponse
 	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		return nil, errors.NewRPCError(errors.CodeRPCUnmarshalFailed, err)
 	}
 
 	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("rpc error from %s: %s (code %d)", targetURL, rpcResp.Error.Message, rpcResp.Error.Code)
+		return nil, errors.NewRPCError(errors.CodeRPCError, fmt.Errorf("rpc error from %s: %s (code %d)", targetURL, rpcResp.Error.Message, rpcResp.Error.Code))
 	}
 
 	logger.Logger.Info("Soroban RPC health check successful", "url", targetURL, "status", rpcResp.Result.Status)
