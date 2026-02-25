@@ -644,6 +644,11 @@ func (c *Client) getLedgerEntriesAttempt(ctx context.Context, keysToFetch []stri
 		}
 	}
 
+	// Cryptographically verify all returned ledger entries
+	if err := VerifyLedgerEntries(keysToFetch, entries); err != nil {
+		return nil, fmt.Errorf("ledger entry verification failed: %w", err)
+	}
+
 	logger.Logger.Info("Ledger entries fetched",
 		// 		"total_requested", len(keys),
 		"total_requested", len(keysToFetch),
