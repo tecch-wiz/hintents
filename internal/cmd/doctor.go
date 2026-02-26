@@ -23,8 +23,9 @@ type DependencyStatus struct {
 }
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Diagnose development environment setup",
+	Use:     "doctor",
+	GroupID: "development",
+	Short:   "Diagnose development environment setup",
 	Long: `Check the status of required dependencies and development tools.
 
 This command verifies:

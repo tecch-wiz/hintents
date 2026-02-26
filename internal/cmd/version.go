@@ -28,8 +28,9 @@ type VersionInfo struct {
 
 // versionCmd represents the version command
 var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Show version information",
+	Use:     "version",
+	GroupID: "utility",
+	Short:   "Show version information",
 	Long:  "Display detailed build information including version, commit hash, and build date",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {

@@ -115,6 +115,11 @@ func (b *SimulationRequestBuilder) Build() (*SimulationRequest, error) {
 		req.LedgerEntries = b.ledgerEntries
 	}
 
+	// Only set restorePreamble if present
+ 	if b.restorePreamble != nil {
+  		req.RestorePreamble = b.restorePreamble
+ 	}
+
 	return req, nil
 }
 

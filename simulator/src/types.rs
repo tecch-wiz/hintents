@@ -5,7 +5,7 @@
 
 use crate::gas_optimizer::OptimizationReport;
 use crate::stack_trace::WasmStackTrace;
-use serde::{Deserialize, Serialize};
+use serde::{ Deserialize, Serialize };
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +23,8 @@ pub struct SimulationRequest {
     pub timestamp: String,
     pub mock_base_fee: Option<u32>,
     pub mock_gas_price: Option<u64>,
+    #[serde(default)]
+    pub restore_preamble: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
