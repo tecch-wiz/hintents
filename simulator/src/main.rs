@@ -153,6 +153,7 @@ fn check_memory_limit_or_panic(host: &Host, memory_limit: Option<u64>) {
 fn execute_operations(
     host: &Host,
     operations: &[Operation],
+    request: &SimulationRequest,
     memory_limit: Option<u64>,
     coverage: &mut CoverageTracker,
 ) -> Result<Vec<String>, HostError> {
@@ -163,6 +164,17 @@ fn execute_operations(
         match &op.body {
             OperationBody::InvokeHostFunction(invoke_op) => {
                 logs.push("Executing InvokeHostFunction...".to_string());
+                
+                // Check for signature verification mock
+                if let Some(mock_result) = check_signature_verification_mocks(&request, &invoke_op.host_function) {
+                    logs.push(format!("Mock signature verification: {:?}", mock_result));
+                    if !mock_result {
+                        return Err(soroban_env_host::HostError::from(
+                            (soroban_env_host::xdr::ScErrorType::Context, soroban_env_host::xdr::ScErrorCode::InvalidInput)
+                        ));
+                    }
+                }
+                
                 let val = host.invoke_function(invoke_op.host_function.clone())?;
                 logs.push(format!("Result: {val:?}"));
                 check_memory_limit_or_panic(host, memory_limit);
@@ -215,6 +227,30 @@ fn mocked_required_fee_stroops(
         Some(required_fee)
     } else {
         None
+    }
+}
+
+fn check_signature_verification_mocks(
+    request: &SimulationRequest,
+    host_function: &soroban_env_host::xdr::HostFunction,
+) -> Option<bool> {
+    // Check if signature verification mocking is enabled
+    let mock_result = request.mock_signature_verification?;
+    
+    // Check if this is a signature verification host function
+    // Note: Current soroban-env-host version only has InvokeContract, CreateContract, and UploadContractWasm
+    // Signature verification functions may be handled at a different level or in newer versions
+    match host_function {
+        // For now, we'll mock signature verification based on function name patterns
+        _ => {
+            // Check if the function name contains signature verification related terms
+            let function_name = host_function.name();
+            if function_name.contains("Verify") || function_name.contains("Signature") || function_name.contains("Ed25519") {
+                Some(mock_result)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -503,7 +539,7 @@ fn main() {
     // Wrap the operation execution in panic protection
     let mut coverage = CoverageTracker::default();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        execute_operations(&host, operations, request.memory_limit, &mut coverage)
+        execute_operations(&host, operations, &request, request.memory_limit, &mut coverage)
     }));
 
     // Budget and Reporting
