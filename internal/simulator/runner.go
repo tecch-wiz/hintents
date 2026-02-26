@@ -169,6 +169,16 @@ func getSimulatorMemoryLimit(req *SimulationRequest) *uint64 {
 	return nil
 }
 
+func getSimulatorCoverageLCOVPath(req *SimulationRequest) *string {
+	if req != nil && req.CoverageLCOVPath != nil {
+		return req.CoverageLCOVPath
+	}
+	if v := os.Getenv("ERST_SIM_COVERAGE_LCOV_PATH"); v != "" {
+		return &v
+	}
+	return nil
+}
+
 // -------------------- Execution --------------------
 
 func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
@@ -178,6 +188,12 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 
 	if req.MemoryLimit == nil {
 		req.MemoryLimit = getSimulatorMemoryLimit(req)
+	}
+	if req.CoverageLCOVPath == nil {
+		req.CoverageLCOVPath = getSimulatorCoverageLCOVPath(req)
+	}
+	if req.CoverageLCOVPath != nil {
+		req.EnableCoverage = true
 	}
 
 	// Enforce sandbox native token cap when set (local/sandbox economic constraint)

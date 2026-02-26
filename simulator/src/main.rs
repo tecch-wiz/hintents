@@ -23,7 +23,9 @@ use soroban_env_host::{
     xdr::{Operation, OperationBody},
     Host, HostError,
 };
+use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io::{self, Read};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -59,6 +61,8 @@ fn send_error(msg: String) {
         status: "error".to_string(),
         error: Some(msg),
         error_code: None,
+        lcov_report: None,
+        lcov_report_path: None,
         events: vec![],
         diagnostic_events: vec![],
         categorized_events: vec![],
@@ -79,6 +83,60 @@ fn send_error(msg: String) {
     std::process::exit(1);
 }
 
+#[derive(Default)]
+struct CoverageTracker {
+    invoked_functions: HashMap<String, u64>,
+}
+
+impl CoverageTracker {
+    fn record_operation(&mut self, op: &Operation) {
+        if let OperationBody::InvokeHostFunction(invoke_op) = &op.body {
+            let function_label = match &invoke_op.host_function {
+                soroban_env_host::xdr::HostFunction::InvokeContract(args) => {
+                    format!("InvokeContract::{:?}", args.function_name)
+                }
+                other => other.name().to_string(),
+            };
+            let entry = self.invoked_functions.entry(function_label).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+    }
+}
+
+fn generate_lcov_report(coverage: &CoverageTracker, source_file: &str) -> String {
+    let mut functions: Vec<(&str, u64)> = coverage
+        .invoked_functions
+        .iter()
+        .map(|(name, count)| (name.as_str(), *count))
+        .collect();
+    functions.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut report = String::new();
+    report.push_str("TN:simulator\n");
+    report.push_str(&format!("SF:{source_file}\n"));
+
+    for (idx, (name, _)) in functions.iter().enumerate() {
+        let sanitized = name.replace('\n', "_").replace(',', "_");
+        report.push_str(&format!("FN:{},{}\n", idx + 1, sanitized));
+    }
+    for (name, count) in &functions {
+        let sanitized = name.replace('\n', "_").replace(',', "_");
+        report.push_str(&format!("FNDA:{count},{sanitized}\n"));
+    }
+
+    let fnf = functions.len();
+    let fnh = functions.iter().filter(|(_, count)| *count > 0).count();
+    report.push_str(&format!("FNF:{fnf}\n"));
+    report.push_str(&format!("FNH:{fnh}\n"));
+
+    // Keep a minimal line section so generic LCOV consumers can parse this file.
+    report.push_str("DA:1,1\n");
+    report.push_str("LF:1\n");
+    report.push_str("LH:1\n");
+    report.push_str("end_of_record\n");
+    report
+}
+
 fn check_memory_limit_or_panic(host: &Host, memory_limit: Option<u64>) {
     if let Some(limit) = memory_limit {
         if let Ok(mem_bytes) = host.budget_cloned().get_mem_bytes_consumed() {
@@ -96,10 +154,12 @@ fn execute_operations(
     host: &Host,
     operations: &[Operation],
     memory_limit: Option<u64>,
+    coverage: &mut CoverageTracker,
 ) -> Result<Vec<String>, HostError> {
     let mut logs = Vec::new();
     check_memory_limit_or_panic(host, memory_limit);
     for op in operations {
+        coverage.record_operation(op);
         match &op.body {
             OperationBody::InvokeHostFunction(invoke_op) => {
                 logs.push("Executing InvokeHostFunction...".to_string());
@@ -232,6 +292,8 @@ fn main() {
             status: "error".to_string(),
             error: Some(format!("Failed to read stdin: {e}")),
             error_code: None,
+            lcov_report: None,
+            lcov_report_path: None,
             events: vec![],
             diagnostic_events: vec![],
             categorized_events: vec![],
@@ -261,6 +323,8 @@ fn main() {
                 status: "error".to_string(),
                 error: Some(format!("Invalid JSON: {e}")),
                 error_code: None,
+                lcov_report: None,
+                lcov_report_path: None,
                 events: vec![],
                 diagnostic_events: vec![],
                 categorized_events: vec![],
@@ -437,8 +501,9 @@ fn main() {
     };
 
     // Wrap the operation execution in panic protection
+    let mut coverage = CoverageTracker::default();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        execute_operations(&host, operations, request.memory_limit)
+        execute_operations(&host, operations, request.memory_limit, &mut coverage)
     }));
 
     // Budget and Reporting
@@ -486,6 +551,27 @@ fn main() {
         } else {
             flamegraph_svg = Some(String::from_utf8_lossy(&result_vec).to_string());
         }
+    }
+
+    let mut lcov_report = None;
+    let mut lcov_report_path = None;
+    if request.enable_coverage {
+        let source_file = request
+            .wasm_path
+            .clone()
+            .unwrap_or_else(|| "contract.wasm".to_string());
+        let report = generate_lcov_report(&coverage, &source_file);
+        if let Some(path) = request.coverage_lcov_path.clone() {
+            match fs::write(&path, &report) {
+                Ok(()) => {
+                    lcov_report_path = Some(path);
+                }
+                Err(e) => {
+                    eprintln!("Failed to write LCOV report: {e}");
+                }
+            }
+        }
+        lcov_report = Some(report);
     }
 
     match result {
@@ -580,6 +666,8 @@ fn main() {
                             declared_fee, required_fee
                         )),
                         error_code: None,
+                        lcov_report: lcov_report.clone(),
+                        lcov_report_path: lcov_report_path.clone(),
                         events,
                         diagnostic_events,
                         categorized_events,
@@ -606,6 +694,8 @@ fn main() {
                 status: "success".to_string(),
                 error: None,
                 error_code: None,
+                lcov_report,
+                lcov_report_path,
                 events,
                 diagnostic_events,
                 categorized_events,
@@ -665,6 +755,8 @@ fn main() {
                     }),
                 ),
                 error_code: None,
+                lcov_report: lcov_report.clone(),
+                lcov_report_path: lcov_report_path.clone(),
                 events: vec![],
                 diagnostic_events: vec![],
                 categorized_events: vec![],
@@ -707,6 +799,8 @@ fn main() {
                 } else {
                     None
                 },
+                lcov_report: lcov_report.clone(),
+                lcov_report_path: lcov_report_path.clone(),
                 events: vec![],
                 diagnostic_events: vec![],
                 categorized_events: vec![],
@@ -985,5 +1079,23 @@ mod tests {
             mapper.map_wasm_offset_to_source(0).is_none(),
             "WASM without .debug_info should yield no source location"
         );
+    }
+
+    #[test]
+    fn test_generate_lcov_report_contains_function_hits() {
+        let mut coverage = CoverageTracker::default();
+        coverage
+            .invoked_functions
+            .insert("InvokeContract::\"transfer\"".to_string(), 3);
+        coverage
+            .invoked_functions
+            .insert("InvokeContract::\"init\"".to_string(), 1);
+
+        let report = generate_lcov_report(&coverage, "/tmp/contract.wasm");
+        assert!(report.contains("SF:/tmp/contract.wasm"));
+        assert!(report.contains("FNDA:3,InvokeContract::\"transfer\""));
+        assert!(report.contains("FNDA:1,InvokeContract::\"init\""));
+        assert!(report.contains("FNF:2"));
+        assert!(report.contains("FNH:2"));
     }
 }

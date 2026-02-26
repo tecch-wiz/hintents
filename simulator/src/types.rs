@@ -23,6 +23,10 @@ pub struct SimulationRequest {
     pub timestamp: String,
     pub mock_base_fee: Option<u32>,
     pub mock_gas_price: Option<u64>,
+    #[serde(default)]
+    pub enable_coverage: bool,
+    #[serde(default)]
+    pub coverage_lcov_path: Option<String>,
     pub resource_calibration: Option<ResourceCalibration>,
     /// Optional hard memory limit in bytes. If set, the simulator will panic
     /// when memory consumption exceeds this limit, simulating live network constraints.
@@ -46,6 +50,10 @@ pub struct SimulationResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lcov_report: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lcov_report_path: Option<String>,
     pub events: Vec<String>,
     pub diagnostic_events: Vec<DiagnosticEvent>,
     pub categorized_events: Vec<CategorizedEvent>,
