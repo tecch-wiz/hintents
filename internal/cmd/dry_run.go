@@ -100,6 +100,11 @@ func runDryRun(cmd *cobra.Command, args []string) error {
 
 	ctx := cmd.Context()
 
+	if checkErr := client.CheckStaleness(ctx, dryRunNetworkFlag); checkErr != nil {
+		// Optional: you can print this to stderr if you want to see why the check failed
+		// fmt.Fprintf(os.Stderr, "Note: Could not verify node freshness: %v\n", checkErr)
+	}
+
 	// Preferred path: Soroban RPC preflight (simulateTransaction)
 	if preflight, err := client.SimulateTransaction(ctx, envXdrB64); err == nil {
 		fee := preflight.Result.MinResourceFee

@@ -125,6 +125,22 @@ type AllNodesFailedError struct {
 	Failures []NodeFailure
 }
 
+type GetLatestLedgerResponse struct {
+	Jsonrpc string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Result  struct {
+		ID          string `json:"id"`
+		Sequence    int    `json:"sequence"`
+		CloseTime   string `json:"closeTime"`
+		HeaderXdr   string `json:"headerXdr"`
+		MetadataXdr string `json:"metadataXdr"`
+	} `json:"result"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
 func (e *AllNodesFailedError) Error() string {
 	var reasons []string
 	for _, f := range e.Failures {
@@ -342,6 +358,11 @@ type GetHealthResponse struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+type StellarbeatResponse struct {
+	LatestLedger int `json:"latestLedger"`
+	// You can add other fields if needed, like 'updatedAt'
 }
 
 // GetTransaction fetches the transaction details and full XDR data
@@ -1182,3 +1203,123 @@ func (c *Client) getHealthAttempt(ctx context.Context) (healthResp *GetHealthRes
 	logger.Logger.Info("Soroban RPC health check successful", "url", targetURL, "status", rpcResp.Result.Status)
 	return &rpcResp, nil
 }
+
+//  Warn if RPC node is lagging behind current ledge
+
+func (c *Client) postRequest(ctx context.Context, payload interface{}, result interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Use c.SorobanURL as the endpoint
+	req, err := http.NewRequestWithContext(ctx, "POST", c.SorobanURL, bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Use the client's internal httpClient
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("http request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return json.NewDecoder(resp.Body).Decode(result)
+}
+
+// GetLatestLedgerSequence fetches the latest ledger from the node this client is configured for.
+func (c *Client) GetLatestLedgerSequence(ctx context.Context) (int, error) {
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "getLatestLedger",
+	}
+
+	var resp GetLatestLedgerResponse
+	err := c.postRequest(ctx, payload, &resp)
+	if err != nil {
+		return 0, err
+	}
+
+	return resp.Result.Sequence, nil
+}
+
+func fetchLatestFromSDF(ctx context.Context, url string) (int, error) {
+	// 1. Prepare the JSON-RPC payload
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "getLatestLedger",
+	}
+	body, _ := json.Marshal(payload)
+
+	// 2. Create the request with a strict timeout
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	// 3. Decode using the struct you found earlier
+	var rpcResp GetLatestLedgerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return 0, err
+	}
+
+	if rpcResp.Error != nil {
+		return 0, fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+	}
+
+	return rpcResp.Result.Sequence, nil
+}
+
+func (c *Client) CheckStaleness(ctx context.Context, network string) error {
+	// 1. Get the ledger sequence from the user's configured RPC (the local node)
+	localLedger, err := c.GetLatestLedgerSequence(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get local ledger: %w", err)
+	}
+
+	// 2. Determine the official reference URL based on the network
+	var referenceURL string
+	switch strings.ToLower(network) {
+	case "testnet":
+		referenceURL = "https://soroban-testnet.stellar.org"
+	case "public":
+		referenceURL = "https://soroban.stellar.org"
+	default:
+		// Skip check for 'standalone' or unknown networks
+		return nil
+	}
+
+	// 3. Fetch the latest ledger from the official SDF reference node
+	refLedger, err := fetchLatestFromSDF(ctx, referenceURL)
+	if err != nil {
+		// We don't want to block the tool if the internet is down,
+		// just log it and move on.
+		return nil
+	}
+
+	// 4. Compare
+	const threshold = 15 // ~1.5 minutes of lag
+	if refLedger > localLedger+threshold {
+		fmt.Printf("\033[33m[WARN]\033[0m Local node is lagging! (Local: %d, Network: %d). \n", localLedger, refLedger)
+		fmt.Println("       Traces and replays might use outdated contract state.")
+	}
+
+	return nil
+}
+
