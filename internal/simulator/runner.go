@@ -5,13 +5,17 @@ package simulator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/dotandev/hintents/internal/errors"
 	"github.com/dotandev/hintents/internal/ipc"
@@ -22,6 +26,10 @@ import (
 type Runner struct {
 	BinaryPath string
 	Debug      bool
+
+	mu         sync.Mutex
+	activeCmds map[*exec.Cmd]struct{}
+	closed     bool
 	MockTime   int64 // non-zero overrides Timestamp in every SimulationRequest
 	Validator  *Validator
 }
@@ -53,6 +61,7 @@ func NewRunner(simPathOverride string, debug bool) (*Runner, error) {
 	return &Runner{
 		BinaryPath: path,
 		Debug:      debug,
+		activeCmds: make(map[*exec.Cmd]struct{}),
 		Validator:  NewValidator(false),
 	}, nil
 }
@@ -182,7 +191,7 @@ func getSimulatorCoverageLCOVPath(req *SimulationRequest) *string {
 
 // -------------------- Execution --------------------
 
-func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
+func (r *Runner) Run(ctx context.Context, req *SimulationRequest) (*SimulationResponse, error) {
 	if req == nil {
 		return nil, errors.NewSimErrorMsg(errors.CodeValidationFailed, "simulation request cannot be nil")
 	}
@@ -196,7 +205,6 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 	if req.CoverageLCOVPath != nil {
 		req.EnableCoverage = true
 	}
-
 	// Enforce sandbox native token cap when set (local/sandbox economic constraint)
 	if capStroops := getSandboxNativeTokenCap(req); capStroops != nil {
 		if err := EnforceSandboxNativeTokenCap(req.EnvelopeXdr, *capStroops); err != nil {
@@ -212,9 +220,7 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 			return nil, err
 		}
 	}
-
 	proto := GetOrDefault(req.ProtocolVersion)
-
 	if req.ProtocolVersion != nil {
 		if err := Validate(*req.ProtocolVersion); err != nil {
 			return nil, err
@@ -236,6 +242,7 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 	}
 
 	cmd := exec.Command(r.BinaryPath)
+	prepareCommand(cmd)
 	cmd.Stdin = bytes.NewReader(inputBytes)
 
 	// Use limited-size buffers to prevent memory growth in daemon mode
@@ -245,9 +252,35 @@ func (r *Runner) Run(req *SimulationRequest) (*SimulationResponse, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		logger.Logger.Error("Simulator execution failed", "error", err, "stderr", stderr.String())
-		return nil, errors.WrapSimCrash(err, stderr.String())
+	if err := cmd.Start(); err != nil {
+		return nil, errors.WrapSimCrash(err, "failed to start simulator")
+	}
+
+	if err := r.trackCommand(cmd); err != nil {
+		_ = terminateCommand(cmd, 100*time.Millisecond)
+		_ = cmd.Wait()
+		return nil, err
+	}
+	defer r.untrackCommand(cmd)
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-waitCh:
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			logger.Logger.Error("Simulator execution failed", "error", err, "stderr", stderr.String())
+			return nil, errors.WrapSimCrash(err, stderr.String())
+		}
+	case <-ctx.Done():
+		_ = r.terminateProcessGroup(cmd, 1500*time.Millisecond)
+		<-waitCh
+		return nil, ctx.Err()
 	}
 
 	var resp SimulationResponse
@@ -284,6 +317,56 @@ func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
 		return len(p), nil
 	}
 	return lb.Buffer.Write(p)
+func (r *Runner) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+
+	cmds := make([]*exec.Cmd, 0, len(r.activeCmds))
+	for cmd := range r.activeCmds {
+		cmds = append(cmds, cmd)
+	}
+	r.mu.Unlock()
+
+	var firstErr error
+	for _, cmd := range cmds {
+		if err := r.terminateProcessGroup(cmd, 1500*time.Millisecond); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return firstErr
+}
+
+func (r *Runner) trackCommand(cmd *exec.Cmd) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("runner is closed")
+	}
+	r.activeCmds[cmd] = struct{}{}
+	return nil
+}
+
+func (r *Runner) untrackCommand(cmd *exec.Cmd) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.activeCmds, cmd)
+}
+
+func (r *Runner) terminateProcessGroup(cmd *exec.Cmd, graceTimeout time.Duration) error {
+	if cmd == nil {
+		return nil
+	}
+	err := terminateCommand(cmd, graceTimeout)
+	if err != nil {
+		logger.Logger.Error("Failed to terminate simulator process", "error", err)
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) applyProtocolConfig(req *SimulationRequest, proto *Protocol) error {
