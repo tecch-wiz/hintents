@@ -75,7 +75,11 @@ func loadSimulationResponse(cmd *cobra.Command, id string) (*simulator.Simulatio
 
 		data, err := store.Load(cmd.Context(), id)
 		if err != nil {
-			return nil, fmt.Errorf("session '%s' not found: %w", id, err)
+			suggestion, suggestErr := suggestSessionID(cmd.Context(), store, id)
+			if suggestErr != nil {
+				return nil, fmt.Errorf("failed to list sessions: %w", suggestErr)
+			}
+			return nil, resourceNotFoundError(suggestion)
 		}
 		return data.ToSimulationResponse()
 	}

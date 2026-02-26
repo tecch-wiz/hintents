@@ -6,6 +6,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dotandev/hintents/internal/errors"
@@ -152,7 +153,11 @@ Use 'erst session list' to see available sessions.`,
 		// Load session
 		data, err := store.Load(ctx, sessionID)
 		if err != nil {
-			return errors.WrapSessionNotFound(sessionID)
+			suggestion, suggestErr := suggestSessionID(ctx, store, sessionID)
+			if suggestErr != nil {
+				return errors.WrapValidationError(fmt.Sprintf("failed to list sessions: %v", suggestErr))
+			}
+			return resourceNotFoundError(suggestion)
 		}
 
 		// Check schema version compatibility
@@ -273,6 +278,13 @@ Use 'erst session list' to see available sessions.`,
 
 		// Delete session
 		if err := store.Delete(ctx, sessionID); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				suggestion, suggestErr := suggestSessionID(ctx, store, sessionID)
+				if suggestErr != nil {
+					return errors.WrapValidationError(fmt.Sprintf("failed to list sessions: %v", suggestErr))
+				}
+				return resourceNotFoundError(suggestion)
+			}
 			return errors.WrapValidationError(fmt.Sprintf("failed to delete session '%s': %v", sessionID, err))
 		}
 
