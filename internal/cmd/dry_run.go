@@ -149,37 +149,16 @@ func runDryRun(cmd *cobra.Command, args []string) error {
 		LedgerEntries: ledgerEntries,
 	}
 
+	gas, err := simulator.EstimateGas(runner, simReq)
 	resp, err := runner.Run(ctx, simReq)
 	if err != nil {
-		return errors.WrapSimulationFailed(err, "")
+		return errors.WrapSimulationFailed(fmt.Errorf("gas estimation: %w", err), "")
 	}
 
-	if resp.BudgetUsage == nil {
-		return errors.WrapSimulationLogicError("simulator did not return budget usage")
-	}
-
-	est, err := estimateFeeFromBudget(*resp.BudgetUsage)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Estimated required fee (stroops): %d\n", est)
-	fmt.Printf("Budget usage: CPU=%d, MEM=%d\n", resp.BudgetUsage.CPUInstructions, resp.BudgetUsage.MemoryBytes)
+	fmt.Printf("Estimated required fee (stroops): %d\n", gas.EstimatedFeeLowerBound)
+	fmt.Printf("Budget usage: CPU=%d, MEM=%d\n", gas.CPUCost, gas.MemoryCost)
 
 	return nil
-}
-
-func estimateFeeFromBudget(b simulator.BudgetUsage) (int64, error) {
-	// Conservative heuristic for now.
-	// TODO: Replace with exact network pricing once fee config is exposed by public RPC.
-	// Base fee + CPU + memory components.
-	const base int64 = 100
-	cpu := int64(b.CPUInstructions / 10000)   // 1 stroop per 10k insns
-	mem := int64(b.MemoryBytes / (64 * 1024)) // 1 stroop per 64KiB
-	if cpu < 0 || mem < 0 {
-		return 0, errors.WrapSimulationLogicError("invalid budget usage")
-	}
-	return base + cpu + mem, nil
 }
 
 func bytesTrimSpace(b []byte) []byte {
