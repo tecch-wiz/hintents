@@ -37,25 +37,28 @@ import (
 )
 
 var (
-	networkFlag        string
-	rpcURLFlag         string
-	rpcTokenFlag       string
-	tracingEnabled     bool
-	otlpExporterURL    string
-	generateTrace      bool
-	traceOutputFile    string
-	snapshotFlag       string
-	compareNetworkFlag string
-	verbose            bool
-	wasmPath           string
-	wasmOptimizeFlag   bool
-	args               []string
-	noCacheFlag        bool
-	demoMode           bool
-	watchFlag          bool
-	watchTimeoutFlag   int
-	mockBaseFeeFlag    uint32
-	mockGasPriceFlag   uint64
+	networkFlag         string
+	rpcURLFlag          string
+	rpcTokenFlag        string
+	tracingEnabled      bool
+	otlpExporterURL     string
+	generateTrace       bool
+	traceOutputFile     string
+	snapshotFlag        string
+	compareNetworkFlag  string
+	verbose             bool
+	wasmPath            string
+	wasmOptimizeFlag    bool
+	args                []string
+	themeFlag           string
+	noCacheFlag         bool
+	demoMode            bool
+	watchFlag           bool
+	watchTimeoutFlag    int
+	mockTimeFlag        int64
+	protocolVersionFlag uint32
+	mockBaseFeeFlag     uint32
+	mockGasPriceFlag    uint64
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -125,6 +128,7 @@ func (d *DebugCommand) runDebug(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return errors.WrapValidationError(fmt.Sprintf("failed to create client: %v", err))
 	}
+	registerCacheFlushHook()
 
 	fmt.Printf("Debugging transaction: %s\n", txHash)
 	fmt.Printf("Network: %s\n", networkFlag)
@@ -255,7 +259,7 @@ Local WASM Replay Mode:
 
 		// Local WASM replay mode
 		if wasmPath != "" {
-			return runLocalWasmReplay()
+			return runLocalWasmReplay(cmd.Context())
 		}
 
 		// Network transaction replay mode
@@ -324,6 +328,7 @@ Local WASM Replay Mode:
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to create client: %v", err))
 		}
+		registerCacheFlushHook()
 
 		if horizonURL == "" {
 			// Extract horizon URL from valid client if not explicitly set
@@ -361,6 +366,10 @@ Local WASM Replay Mode:
 			}, nil)
 
 			if err != nil {
+				if IsCancellation(err) {
+					spinner.StopWithMessage("Interrupted. Stopping watch...")
+					return err
+				}
 				spinner.StopWithError("Failed to poll for transaction")
 				return errors.WrapSimulationLogicError(fmt.Sprintf("watch mode error: %v", err))
 			}
@@ -392,6 +401,8 @@ Local WASM Replay Mode:
 		if err != nil {
 			return errors.WrapSimulatorNotFound(err.Error())
 		}
+		registerRunnerCloseHook("debug-simulator-runner", runner)
+		defer func() { _ = runner.Close() }()
 
 		// Determine timestamps to simulate
 		timestamps := []int64{TimestampFlag}
@@ -455,7 +466,7 @@ Local WASM Replay Mode:
 				}
 				applySimulationFeeMocks(simReq)
 
-				simResp, err = runner.Run(simReq)
+				simResp, err = runner.Run(ctx, simReq)
 				if err != nil {
 					return errors.WrapSimulationFailed(err, "")
 				}
@@ -493,7 +504,7 @@ Local WASM Replay Mode:
 						Timestamp:     ts,
 					}
 					applySimulationFeeMocks(primaryReq)
-					primaryResult, primaryErr = runner.Run(primaryReq)
+					primaryResult, primaryErr = runner.Run(ctx, primaryReq)
 				}()
 
 				go func() {
@@ -533,7 +544,7 @@ Local WASM Replay Mode:
 						Timestamp:     ts,
 					}
 					applySimulationFeeMocks(compareReq)
-					compareResult, compareErr = runner.Run(compareReq)
+					compareResult, compareErr = runner.Run(ctx, compareReq)
 				}()
 
 				wg.Wait()
@@ -688,7 +699,7 @@ func runDemoMode(cmdArgs []string) error {
 	return nil
 }
 
-func runLocalWasmReplay() error {
+func runLocalWasmReplay(ctx context.Context) error {
 	fmt.Printf("%s  WARNING: Using Mock State (not mainnet data)\n", visualizer.Warning())
 	fmt.Println()
 	effectiveWasmPath := wasmPath
@@ -721,6 +732,8 @@ func runLocalWasmReplay() error {
 	if err != nil {
 		return errors.WrapSimulatorNotFound(err.Error())
 	}
+	registerRunnerCloseHook("local-wasm-simulator-runner", runner)
+	defer func() { _ = runner.Close() }()
 
 	// Create simulation request with local WASM
 	req := &simulator.SimulationRequest{
@@ -734,7 +747,7 @@ func runLocalWasmReplay() error {
 
 	// Run simulation
 	fmt.Printf("%s Executing contract locally...\n", visualizer.Symbol("play"))
-	resp, err := runner.Run(req)
+	resp, err := runner.Run(ctx, req)
 	if err != nil {
 		fmt.Printf("%s Technical failure: %v\n", visualizer.Error(), err)
 		return err
@@ -1093,12 +1106,19 @@ func init() {
 	debugCmd.Flags().StringVar(&wasmPath, "wasm", "", "Path to local WASM file for local replay (no network required)")
 	debugCmd.Flags().BoolVar(&wasmOptimizeFlag, "optimize", false, "Run dead-code elimination on local WASM before replay")
 	debugCmd.Flags().StringSliceVar(&args, "args", []string{}, "Mock arguments for local replay (JSON array of strings)")
+	debugCmd.Flags().StringVar(&themeFlag, "theme", "", "Output theme (default, deuteranopia, protanopia, tritanopia, high-contrast)")
 	debugCmd.Flags().BoolVar(&noCacheFlag, "no-cache", false, "Disable local ledger state caching")
 	debugCmd.Flags().BoolVar(&demoMode, "demo", false, "Print sample output (no network) - for testing color detection")
 	debugCmd.Flags().BoolVar(&watchFlag, "watch", false, "Poll for transaction on-chain before debugging")
 	debugCmd.Flags().IntVar(&watchTimeoutFlag, "watch-timeout", 30, "Timeout in seconds for watch mode")
+	debugCmd.Flags().Int64Var(&mockTimeFlag, "mock-time", 0, "Override ledger timestamp (Unix epoch) for simulation")
+	debugCmd.Flags().Uint32Var(&protocolVersionFlag, "protocol-version", 0, "Override protocol version for simulation")
 	debugCmd.Flags().Uint32Var(&mockBaseFeeFlag, "mock-base-fee", 0, "Override base fee (stroops) for local fee sufficiency checks")
 	debugCmd.Flags().Uint64Var(&mockGasPriceFlag, "mock-gas-price", 0, "Override gas price multiplier for local fee sufficiency checks")
+
+	_ = debugCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("compare-network", completeNetworkFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
 
 	rootCmd.AddCommand(debugCmd)
 }

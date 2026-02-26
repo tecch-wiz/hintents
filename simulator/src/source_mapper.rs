@@ -3,8 +3,9 @@
 
 use gimli::{self, ColumnType, Dwarf, EndianSlice, Reader, RunTimeEndian, SectionId};
 use object::{Object, ObjectSection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 pub struct SourceMapper {
     has_symbols: bool,
@@ -15,7 +16,7 @@ pub struct SourceMapper {
 pub struct SourceLocation {
     pub file: String,
     pub line: u32,
-    pub column: u32,
+    pub column: Option<u32>,
     pub column_end: Option<u32>,
 }
 
@@ -29,6 +30,15 @@ struct CachedLineEntry {
 impl SourceMapper {
     /// Creates a new SourceMapper with caching enabled
     pub fn new(wasm_bytes: Vec<u8>) -> Self {
+        Self::new_with_options(wasm_bytes, false)
+    }
+
+    /// Creates a new SourceMapper, bypassing the cache when `no_cache` is true.
+    /// When `no_cache` is true, WASM debug symbols are always re-parsed from scratch.
+    pub fn new_with_options(wasm_bytes: Vec<u8>, no_cache: bool) -> Self {
+        if no_cache {
+            eprintln!("--no-cache: skipping cache, re-parsing WASM symbols from scratch.");
+        }
         let has_symbols = Self::check_debug_symbols(&wasm_bytes);
         let line_cache = if has_symbols {
             Self::build_line_cache(&wasm_bytes).unwrap_or_default()
@@ -42,6 +52,12 @@ impl SourceMapper {
         }
     }
 
+    /// Backward-compatible constructor used by tests.
+    #[allow(dead_code)]
+    pub fn new_with_cache(wasm_bytes: Vec<u8>, _cache_dir: PathBuf) -> Self {
+        Self::new(wasm_bytes)
+    }
+
     fn check_debug_symbols(wasm_bytes: &[u8]) -> bool {
         if let Ok(obj_file) = object::File::parse(wasm_bytes) {
             obj_file.section_by_name(".debug_info").is_some()
@@ -51,6 +67,7 @@ impl SourceMapper {
         }
     }
 
+    #[allow(deprecated)]
     fn build_line_cache(wasm_bytes: &[u8]) -> Result<Vec<CachedLineEntry>, String> {
         let obj_file = object::File::parse(wasm_bytes)
             .map_err(|err| format!("failed to parse wasm object: {err}"))?;
@@ -144,6 +161,7 @@ impl SourceMapper {
                         file: file_name,
                         line: line.get() as u32,
                         column,
+                        column_end: None,
                     };
 
                     if let Some((start, prev_location)) = pending.replace((row.address(), location))
@@ -226,16 +244,12 @@ impl SourceMapper {
     pub fn has_debug_symbols(&self) -> bool {
         self.has_symbols
     }
-
-    /// Returns the WASM hash used for caching
-    pub fn get_wasm_hash(&self) -> &str {
-        &self.wasm_hash
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_map_cache::{SourceMapCache, SourceMapCacheEntry};
     use tempfile::TempDir;
 
     fn mapper_with_cache(entries: Vec<CachedLineEntry>) -> SourceMapper {
@@ -255,6 +269,16 @@ mod tests {
     }
 
     #[test]
+    fn test_new_with_options_no_cache_still_parses() {
+        let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d];
+        let mapper = SourceMapper::new_with_options(wasm_bytes, true);
+
+        // Should still work — just re-parsed without cache
+        assert!(!mapper.has_debug_symbols());
+        assert!(mapper.map_wasm_offset_to_source(0x1234).is_none());
+    }
+
+    #[test]
     fn test_cached_lookup_uses_address_ranges() {
         let mapper = mapper_with_cache(vec![
             CachedLineEntry {
@@ -264,6 +288,7 @@ mod tests {
                     file: "lib.rs".into(),
                     line: 10,
                     column: Some(1),
+                    column_end: None,
                 },
             },
             CachedLineEntry {
@@ -273,6 +298,7 @@ mod tests {
                     file: "lib.rs".into(),
                     line: 20,
                     column: Some(2),
+                    column_end: None,
                 },
             },
         ]);
@@ -294,6 +320,7 @@ mod tests {
                 file: "mod.rs".into(),
                 line: 7,
                 column: None,
+                column_end: None,
             },
         }]);
 
@@ -305,7 +332,7 @@ mod tests {
         let location = SourceLocation {
             file: "test.rs".to_string(),
             line: 42,
-            column: 10,
+            column: Some(10),
             column_end: Some(15),
         };
 
@@ -320,25 +347,18 @@ mod tests {
         let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d];
         let wasm_hash = SourceMapCache::compute_wasm_hash(&wasm_bytes);
 
-        // First create - this will NOT populate cache because has_symbols is false
-        // The current implementation only caches when debug symbols are present
         {
             let mapper =
-                SourceMapper::new_with_cache(wasm_bytes.clone(), temp_dir.path().to_path_buf());
+                SourceMapper::new_with_options(wasm_bytes.clone(), false);
             assert!(!mapper.has_debug_symbols());
-
-            // Try to map - should work even without symbols
             let result = mapper.map_wasm_offset_to_source(0x1234);
-            // Without debug symbols, should return None
             assert!(result.is_none());
         }
 
-        // Verify cache was NOT created (since no debug symbols)
         let cache = SourceMapCache::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
         let entries = cache.list_cached().unwrap();
         assert_eq!(entries.len(), 0);
 
-        // Test that we can create cache entries directly
         let mut mappings = std::collections::HashMap::new();
         mappings.insert(
             0x1234,
@@ -346,6 +366,7 @@ mod tests {
                 file: "test.rs".to_string(),
                 line: 42,
                 column: Some(10),
+                column_end: None,
             },
         );
 
@@ -358,7 +379,6 @@ mod tests {
 
         cache.store(entry).unwrap();
 
-        // Verify cache was created
         let entries = cache.list_cached().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].wasm_hash, wasm_hash);

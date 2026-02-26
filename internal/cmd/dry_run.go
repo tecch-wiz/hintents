@@ -57,6 +57,8 @@ func init() {
 	dryRunCmd.Flags().StringVar(&dryRunRPCURLFlag, "rpc-url", "", "Custom Horizon RPC URL to use")
 	dryRunCmd.Flags().StringVar(&dryRunRPCTokenFlag, "rpc-token", "", "RPC authentication token (can also use ERST_RPC_TOKEN env var)")
 
+	_ = dryRunCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)
+
 	rootCmd.AddCommand(dryRunCmd)
 }
 
@@ -94,6 +96,7 @@ func runDryRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return errors.WrapValidationError(fmt.Sprintf("failed to create client: %v", err))
 	}
+	registerCacheFlushHook()
 
 	ctx := cmd.Context()
 
@@ -126,10 +129,17 @@ func runDryRun(cmd *cobra.Command, args []string) error {
 		return errors.WrapRPCConnectionFailed(err)
 	}
 
+	// Warn if the fetched ledger entries exceed the Soroban network size limit.
+	// The network rejects transactions whose footprint exceeds 1 MiB, so there
+	// is no point invoking the simulator — the tx will never land on-chain.
+	simulator.WarnLedgerEntriesSizeToStderr(ledgerEntries)
+
 	runner, err := simulator.NewRunner("", false)
 	if err != nil {
 		return errors.WrapSimulatorNotFound(err.Error())
 	}
+	registerRunnerCloseHook("dry-run-simulator-runner", runner)
+	defer func() { _ = runner.Close() }()
 
 	// The current Rust simulator requires a non-empty result_meta_xdr.
 	// For dry-run we don't have it (tx not on-chain), so we use a placeholder.
@@ -140,6 +150,7 @@ func runDryRun(cmd *cobra.Command, args []string) error {
 	}
 
 	gas, err := simulator.EstimateGas(runner, simReq)
+	resp, err := runner.Run(ctx, simReq)
 	if err != nil {
 		return errors.WrapSimulationFailed(fmt.Errorf("gas estimation: %w", err), "")
 	}
