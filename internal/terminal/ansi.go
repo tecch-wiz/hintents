@@ -23,6 +23,8 @@ const (
 	sgrBold    = "\033[1m"
 )
 
+var _ Renderer = (*ANSIRenderer)(nil)
+
 type ANSIRenderer struct {
 }
 

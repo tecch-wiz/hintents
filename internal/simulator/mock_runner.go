@@ -7,6 +7,8 @@ import (
 	"context"
 )
 
+var _ RunnerInterface = (*MockRunner)(nil)
+
 type MockRunner struct {
 	RunFunc   func(ctx context.Context, req *SimulationRequest) (*SimulationResponse, error)
 	CloseFunc func() error
